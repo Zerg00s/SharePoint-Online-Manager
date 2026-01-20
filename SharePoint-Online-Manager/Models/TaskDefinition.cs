@@ -1,0 +1,106 @@
+namespace SharePointOnlineManager.Models;
+
+/// <summary>
+/// Defines the type of task that can be executed.
+/// </summary>
+public enum TaskType
+{
+    /// <summary>
+    /// Report on all lists across selected site collections.
+    /// </summary>
+    ListsReport,
+
+    /// <summary>
+    /// Compare list item counts between source and target sites.
+    /// </summary>
+    ListCompare
+}
+
+/// <summary>
+/// Defines the execution status of a task.
+/// </summary>
+public enum TaskStatus
+{
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled
+}
+
+/// <summary>
+/// Represents a persistent task definition that can be saved and re-executed.
+/// </summary>
+public class TaskDefinition
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = string.Empty;
+    public TaskType Type { get; set; }
+    public Guid ConnectionId { get; set; }
+    public List<string> TargetSiteUrls { get; set; } = [];
+    public string? ConfigurationJson { get; set; }
+    public TaskStatus Status { get; set; } = TaskStatus.Pending;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? LastRunAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    public string? LastError { get; set; }
+    public int TotalSites => TargetSiteUrls.Count;
+
+    /// <summary>
+    /// Gets the task type as a human-readable string.
+    /// </summary>
+    public string TypeDescription => Type switch
+    {
+        TaskType.ListsReport => "Lists Report",
+        TaskType.ListCompare => "List Compare",
+        _ => Type.ToString()
+    };
+
+    /// <summary>
+    /// Gets the status as a human-readable string.
+    /// </summary>
+    public string StatusDescription => Status switch
+    {
+        TaskStatus.Pending => "Pending",
+        TaskStatus.Running => "Running",
+        TaskStatus.Completed => "Completed",
+        TaskStatus.Failed => "Failed",
+        TaskStatus.Cancelled => "Cancelled",
+        _ => Status.ToString()
+    };
+}
+
+/// <summary>
+/// Extension methods for TaskType enum.
+/// </summary>
+public static class TaskTypeExtensions
+{
+    /// <summary>
+    /// Gets a human-readable description of the task type.
+    /// </summary>
+    public static string GetDescription(this TaskType type) => type switch
+    {
+        TaskType.ListsReport => "Report on all lists across selected sites",
+        TaskType.ListCompare => "Compare list item counts between source and target sites",
+        _ => type.ToString()
+    };
+
+    /// <summary>
+    /// Gets the display name for the task type.
+    /// </summary>
+    public static string GetDisplayName(this TaskType type) => type switch
+    {
+        TaskType.ListsReport => "Lists Report",
+        TaskType.ListCompare => "List Compare",
+        _ => type.ToString()
+    };
+
+    /// <summary>
+    /// Indicates whether the task type requires dual connections (source and target).
+    /// </summary>
+    public static bool RequiresDualConnections(this TaskType type) => type switch
+    {
+        TaskType.ListCompare => true,
+        _ => false
+    };
+}

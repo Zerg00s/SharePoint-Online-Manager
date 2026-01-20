@@ -1,0 +1,59 @@
+using SharePointOnlineManager.Models;
+
+namespace SharePointOnlineManager.Services;
+
+/// <summary>
+/// Indicates the result status of a SharePoint API call.
+/// </summary>
+public enum SharePointResultStatus
+{
+    Success,
+    AuthenticationRequired,
+    AccessDenied,
+    NotFound,
+    Error
+}
+
+/// <summary>
+/// Result wrapper for SharePoint API calls with authentication status.
+/// </summary>
+/// <typeparam name="T">The result data type.</typeparam>
+public class SharePointResult<T>
+{
+    public T? Data { get; init; }
+    public SharePointResultStatus Status { get; init; }
+    public string? ErrorMessage { get; init; }
+    public bool IsSuccess => Status == SharePointResultStatus.Success;
+    public bool NeedsReauth => Status == SharePointResultStatus.AuthenticationRequired;
+}
+
+/// <summary>
+/// Interface for SharePoint REST API operations.
+/// </summary>
+public interface ISharePointService : IDisposable
+{
+    /// <summary>
+    /// Gets the domain this service is authenticated for.
+    /// </summary>
+    string Domain { get; }
+
+    /// <summary>
+    /// Gets information about a SharePoint site.
+    /// </summary>
+    Task<SiteInfo> GetSiteInfoAsync(string siteUrl);
+
+    /// <summary>
+    /// Tests the connection to a SharePoint site.
+    /// </summary>
+    Task<bool> TestConnectionAsync(string siteUrl);
+
+    /// <summary>
+    /// Gets all lists from a SharePoint site.
+    /// </summary>
+    Task<SharePointResult<List<ListInfo>>> GetListsAsync(string siteUrl);
+
+    /// <summary>
+    /// Gets all lists from a SharePoint site with optional filtering.
+    /// </summary>
+    Task<SharePointResult<List<ListInfo>>> GetListsAsync(string siteUrl, bool includeHidden);
+}
