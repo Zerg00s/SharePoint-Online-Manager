@@ -188,6 +188,14 @@ public class TaskListScreen : BaseScreen
         {
             await NavigationService!.NavigateToAsync<ListCompareDetailScreen>(task);
         }
+        else if (task.Type == TaskType.DocumentReport)
+        {
+            await NavigationService!.NavigateToAsync<DocumentReportDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.PermissionReport)
+        {
+            await NavigationService!.NavigateToAsync<PermissionReportDetailScreen>(task);
+        }
         else
         {
             await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
@@ -211,6 +219,14 @@ public class TaskListScreen : BaseScreen
         if (task.Type == TaskType.ListCompare)
         {
             await NavigationService!.NavigateToAsync<ListCompareDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.DocumentReport)
+        {
+            await NavigationService!.NavigateToAsync<DocumentReportDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.PermissionReport)
+        {
+            await NavigationService!.NavigateToAsync<PermissionReportDetailScreen>(execParam);
         }
         else
         {

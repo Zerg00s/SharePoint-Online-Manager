@@ -126,14 +126,14 @@ public class TaskTypeSelectionScreen : BaseScreen
         {
             Text = taskType.GetDisplayName(),
             Font = new Font(Font.FontFamily, 11, FontStyle.Bold),
-            Location = new Point(60, 15),
+            Location = new Point(75, 15),
             AutoSize = true
         };
 
         var descLabel = new Label
         {
             Text = taskType.GetDescription(),
-            Location = new Point(60, 40),
+            Location = new Point(75, 40),
             AutoSize = true,
             ForeColor = SystemColors.GrayText
         };
@@ -169,6 +169,8 @@ public class TaskTypeSelectionScreen : BaseScreen
     {
         TaskType.ListsReport => "\U0001F4CB", // clipboard emoji
         TaskType.ListCompare => "\U0001F504", // arrows clockwise emoji (compare)
+        TaskType.DocumentReport => "\U0001F4C1", // file folder emoji (documents)
+        TaskType.PermissionReport => "\U0001F512", // lock emoji (permissions)
         _ => "\U0001F4C4" // page emoji
     };
 
@@ -192,8 +194,19 @@ public class TaskTypeSelectionScreen : BaseScreen
 
             SetStatus($"Task '{task.Name}' created with {_context.SelectedSites.Count} sites");
 
-            // Navigate to task detail
-            await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
+            // Navigate to appropriate detail screen based on task type
+            if (taskType == TaskType.DocumentReport)
+            {
+                await NavigationService!.NavigateToAsync<DocumentReportDetailScreen>(task);
+            }
+            else if (taskType == TaskType.PermissionReport)
+            {
+                await NavigationService!.NavigateToAsync<PermissionReportDetailScreen>(task);
+            }
+            else
+            {
+                await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
+            }
         }
     }
 }

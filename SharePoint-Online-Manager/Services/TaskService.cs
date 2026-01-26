@@ -123,7 +123,8 @@ public class TaskService : ITaskService
                     continue;
                 }
 
-                using var spService = new SharePointService(cookies);
+                // Pass the actual target domain so cookies are set correctly
+                using var spService = new SharePointService(cookies, domain);
 
                 foreach (var siteUrl in domainGroup)
                 {
@@ -622,6 +623,618 @@ public class TaskService : ITaskService
     {
         var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
         var fileName = $"listcompare_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public async Task<DocumentReportResult> ExecuteDocumentReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new DocumentReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        // Deserialize configuration
+        DocumentReportConfiguration config;
+        if (string.IsNullOrEmpty(task.ConfigurationJson))
+        {
+            // Use defaults if no config
+            config = new DocumentReportConfiguration
+            {
+                ConnectionId = task.ConnectionId,
+                TargetSiteUrls = task.TargetSiteUrls
+            };
+        }
+        else
+        {
+            try
+            {
+                config = JsonSerializer.Deserialize<DocumentReportConfiguration>(task.ConfigurationJson, _jsonOptions)
+                         ?? new DocumentReportConfiguration
+                         {
+                             ConnectionId = task.ConnectionId,
+                             TargetSiteUrls = task.TargetSiteUrls
+                         };
+            }
+            catch (Exception ex)
+            {
+                result.Success = false;
+                result.ErrorMessage = $"Invalid configuration: {ex.Message}";
+                result.Log($"Error: {result.ErrorMessage}");
+                task.Status = Models.TaskStatus.Failed;
+                task.LastError = result.ErrorMessage;
+                await SaveTaskAsync(task);
+                await SaveDocumentReportResultAsync(result);
+                return result;
+            }
+        }
+
+        // Use task.TargetSiteUrls if config doesn't have any
+        var targetUrls = config.TargetSiteUrls.Count > 0 ? config.TargetSiteUrls : task.TargetSiteUrls;
+        result.Log($"Starting document report task for {targetUrls.Count} sites");
+
+        // Debug: List all stored credential domains
+        var storedDomains = authService.GetStoredDomains();
+        System.Diagnostics.Debug.WriteLine($"[SPOManager] ExecuteDocumentReportAsync - Stored credential domains: [{string.Join(", ", storedDomains)}]");
+        result.Log($"DEBUG: Stored credential domains: [{string.Join(", ", storedDomains)}]");
+        result.Log($"DEBUG: Target URLs: [{string.Join(", ", targetUrls)}]");
+
+        // Parse extension filter
+        var extensionFilter = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(config.ExtensionFilter))
+        {
+            var extensions = config.ExtensionFilter
+                .Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(e => e.Trim().TrimStart('.').ToLowerInvariant());
+            foreach (var ext in extensions)
+            {
+                extensionFilter.Add(ext);
+            }
+            result.Log($"Extension filter: {string.Join(", ", extensionFilter)}");
+        }
+
+        try
+        {
+            // Group sites by domain for efficient cookie usage
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] Looking for cookies for domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] GetStoredCookies result - Found: {cookies != null}, IsValid: {cookies?.IsValid}, Domain: {cookies?.Domain}, User: {cookies?.UserEmail}");
+                result.Log($"DEBUG: Cookies lookup for '{domain}' - Found: {cookies != null}, IsValid: {cookies?.IsValid}");
+
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] FAILED: No valid credentials for {domain}");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SiteDocumentResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] SUCCESS: Using cookies from {cookies.Domain} for {domain}");
+                // Pass the actual target domain so cookies are set correctly
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Processing {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    var siteResult = new SiteDocumentResult { SiteUrl = siteUrl };
+
+                    try
+                    {
+                        // Get site info for title
+                        var siteInfo = await spService.GetSiteInfoAsync(siteUrl);
+                        siteResult.SiteTitle = siteInfo.Title;
+
+                        // Get document libraries (BaseTemplate = 101)
+                        var listsResult = await spService.GetListsAsync(siteUrl, config.IncludeHiddenLibraries);
+
+                        if (!listsResult.IsSuccess || listsResult.Data == null)
+                        {
+                            throw new InvalidOperationException(
+                                $"Failed to get lists: {listsResult.ErrorMessage}");
+                        }
+
+                        var documentLibraries = listsResult.Data
+                            .Where(l => l.BaseTemplate == 101) // Document Library template
+                            .ToList();
+
+                        result.Log($"  Found {documentLibraries.Count} document libraries");
+
+                        foreach (var library in documentLibraries)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            result.Log($"  Processing library: {library.Title}");
+
+                            var filesResult = await spService.GetDocumentLibraryFilesAsync(
+                                siteUrl,
+                                library.Title,
+                                config.IncludeSubfolders,
+                                config.IncludeVersionCount);
+
+                            if (filesResult.IsSuccess && filesResult.Data != null)
+                            {
+                                var files = filesResult.Data;
+
+                                // Apply extension filter if specified
+                                if (extensionFilter.Count > 0)
+                                {
+                                    files = files.Where(f => extensionFilter.Contains(f.Extension)).ToList();
+                                }
+
+                                // Set site title on all documents
+                                foreach (var file in files)
+                                {
+                                    file.SiteTitle = siteResult.SiteTitle;
+                                }
+
+                                siteResult.Documents.AddRange(files);
+                                siteResult.LibrariesProcessed++;
+                                result.Log($"    Found {files.Count} documents");
+                            }
+                            else
+                            {
+                                result.Log($"    Error getting files: {filesResult.ErrorMessage}");
+                            }
+                        }
+
+                        siteResult.Success = true;
+                        result.SuccessfulSites++;
+                        result.Log($"  Site completed: {siteResult.TotalDocuments} documents, {siteResult.LibrariesProcessed} libraries");
+                    }
+                    catch (Exception ex)
+                    {
+                        siteResult.Success = false;
+                        siteResult.ErrorMessage = ex.Message;
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.SiteResults.Add(siteResult);
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+
+            var (totalDocs, totalSize, totalLibs) = result.GetSummary();
+            result.Log($"Task completed. Sites: {result.SuccessfulSites} successful, {result.FailedSites} failed");
+            result.Log($"Total: {totalDocs} documents, {FormatSize(totalSize)}, {totalLibs} libraries");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveDocumentReportResultAsync(result);
+
+        return result;
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
+        double len = bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len = len / 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+
+    public async Task<List<DocumentReportResult>> GetDocumentReportResultsAsync(Guid taskId)
+    {
+        var results = new List<DocumentReportResult>();
+        var pattern = $"docreport_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<DocumentReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<DocumentReportResult?> GetLatestDocumentReportResultAsync(Guid taskId)
+    {
+        var results = await GetDocumentReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveDocumentReportResultAsync(DocumentReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"docreport_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public async Task<PermissionReportResult> ExecutePermissionReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new PermissionReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        // Deserialize configuration
+        PermissionReportConfiguration config;
+        if (string.IsNullOrEmpty(task.ConfigurationJson))
+        {
+            config = new PermissionReportConfiguration
+            {
+                ConnectionId = task.ConnectionId,
+                TargetSiteUrls = task.TargetSiteUrls
+            };
+        }
+        else
+        {
+            try
+            {
+                config = JsonSerializer.Deserialize<PermissionReportConfiguration>(task.ConfigurationJson, _jsonOptions)
+                         ?? new PermissionReportConfiguration
+                         {
+                             ConnectionId = task.ConnectionId,
+                             TargetSiteUrls = task.TargetSiteUrls
+                         };
+            }
+            catch (Exception ex)
+            {
+                result.Success = false;
+                result.ErrorMessage = $"Invalid configuration: {ex.Message}";
+                result.Log($"Error: {result.ErrorMessage}");
+                task.Status = Models.TaskStatus.Failed;
+                task.LastError = result.ErrorMessage;
+                await SaveTaskAsync(task);
+                await SavePermissionReportResultAsync(result);
+                return result;
+            }
+        }
+
+        var targetUrls = config.TargetSiteUrls.Count > 0 ? config.TargetSiteUrls : task.TargetSiteUrls;
+        result.Log($"Starting permission report task for {targetUrls.Count} sites");
+        result.Log($"Options: Sites={config.IncludeSitePermissions}, Lists={config.IncludeListPermissions}, " +
+                   $"Folders={config.IncludeFolderPermissions}, Items={config.IncludeItemPermissions}, " +
+                   $"Inherited={config.IncludeInheritedPermissions}, Hidden={config.IncludeHiddenLists}");
+
+        try
+        {
+            // Group sites by domain for efficient cookie usage
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SitePermissionResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                // Pass the actual target domain so cookies are set correctly
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Processing {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    var siteResult = new SitePermissionResult { SiteUrl = siteUrl };
+
+                    try
+                    {
+                        // Get site info for title
+                        var siteInfo = await spService.GetSiteInfoAsync(siteUrl);
+                        siteResult.SiteTitle = siteInfo.Title;
+
+                        // Determine site collection URL (for context)
+                        var siteCollectionUrl = GetSiteCollectionUrl(siteUrl);
+
+                        // Get site/web permissions
+                        if (config.IncludeSitePermissions)
+                        {
+                            result.Log($"  Getting site permissions...");
+                            var webPermsResult = await spService.GetWebPermissionsAsync(
+                                siteUrl, siteCollectionUrl, config.IncludeInheritedPermissions);
+
+                            if (webPermsResult.IsSuccess && webPermsResult.Data != null)
+                            {
+                                siteResult.Permissions.AddRange(webPermsResult.Data);
+                                result.Log($"    Found {webPermsResult.Data.Count} site permission entries");
+                            }
+                            else
+                            {
+                                result.Log($"    Error getting site permissions: {webPermsResult.ErrorMessage}");
+                            }
+                        }
+
+                        // Get lists and libraries
+                        if (config.IncludeListPermissions || config.IncludeFolderPermissions || config.IncludeItemPermissions)
+                        {
+                            var listsResult = await spService.GetListsAsync(siteUrl, config.IncludeHiddenLists);
+
+                            if (listsResult.IsSuccess && listsResult.Data != null)
+                            {
+                                result.Log($"  Processing {listsResult.Data.Count} lists/libraries...");
+
+                                foreach (var list in listsResult.Data)
+                                {
+                                    cancellationToken.ThrowIfCancellationRequested();
+
+                                    var isLibrary = list.BaseTemplate == 101;
+
+                                    // Get list permissions
+                                    if (config.IncludeListPermissions)
+                                    {
+                                        var listPermsResult = await spService.GetListPermissionsAsync(
+                                            siteUrl, siteCollectionUrl, list.Title, isLibrary,
+                                            config.IncludeInheritedPermissions);
+
+                                        if (listPermsResult.IsSuccess && listPermsResult.Data != null && listPermsResult.Data.Count > 0)
+                                        {
+                                            siteResult.Permissions.AddRange(listPermsResult.Data);
+                                            result.Log($"    {list.Title}: {listPermsResult.Data.Count} permission entries");
+                                        }
+                                    }
+
+                                    // Get item/folder permissions (only if unique permissions exist)
+                                    if (config.IncludeFolderPermissions || config.IncludeItemPermissions)
+                                    {
+                                        var itemPermsResult = await spService.GetItemPermissionsAsync(
+                                            siteUrl, siteCollectionUrl, list.Title, isLibrary,
+                                            config.IncludeFolderPermissions, config.IncludeItemPermissions,
+                                            config.IncludeInheritedPermissions);
+
+                                        if (itemPermsResult.IsSuccess && itemPermsResult.Data != null && itemPermsResult.Data.Count > 0)
+                                        {
+                                            siteResult.Permissions.AddRange(itemPermsResult.Data);
+                                            result.Log($"    {list.Title}: {itemPermsResult.Data.Count} item/folder permission entries");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        siteResult.Success = true;
+                        result.SuccessfulSites++;
+                        result.Log($"  Site completed: {siteResult.TotalPermissions} permission entries");
+                    }
+                    catch (Exception ex)
+                    {
+                        siteResult.Success = false;
+                        siteResult.ErrorMessage = ex.Message;
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.SiteResults.Add(siteResult);
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+
+            var (totalPerms, uniqueObjects, uniquePrincipals) = result.GetSummary();
+            result.Log($"Task completed. Sites: {result.SuccessfulSites} successful, {result.FailedSites} failed");
+            result.Log($"Total: {totalPerms} permissions, {uniqueObjects} unique objects, {uniquePrincipals} principals");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SavePermissionReportResultAsync(result);
+
+        return result;
+    }
+
+    private static string GetSiteCollectionUrl(string siteUrl)
+    {
+        // Extract site collection URL from site URL
+        // e.g., https://tenant.sharepoint.com/sites/hr/subsite -> https://tenant.sharepoint.com/sites/hr
+        var uri = new Uri(siteUrl);
+        var pathParts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        if (pathParts.Length >= 2 && (pathParts[0].Equals("sites", StringComparison.OrdinalIgnoreCase) ||
+                                       pathParts[0].Equals("teams", StringComparison.OrdinalIgnoreCase)))
+        {
+            return $"{uri.Scheme}://{uri.Host}/{pathParts[0]}/{pathParts[1]}";
+        }
+
+        // Root site collection
+        return $"{uri.Scheme}://{uri.Host}";
+    }
+
+    public async Task<List<PermissionReportResult>> GetPermissionReportResultsAsync(Guid taskId)
+    {
+        var results = new List<PermissionReportResult>();
+        var pattern = $"permreport_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<PermissionReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<PermissionReportResult?> GetLatestPermissionReportResultAsync(Guid taskId)
+    {
+        var results = await GetPermissionReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SavePermissionReportResultAsync(PermissionReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"permreport_{result.TaskId}_{timestamp}.json";
         var filePath = Path.Combine(_resultsFolder, fileName);
 
         var json = JsonSerializer.Serialize(result, _jsonOptions);

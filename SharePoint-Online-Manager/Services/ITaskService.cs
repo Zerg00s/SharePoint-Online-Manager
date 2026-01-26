@@ -75,6 +75,54 @@ public interface ITaskService
     /// Saves a list compare result.
     /// </summary>
     Task SaveListCompareResultAsync(ListCompareResult result);
+
+    /// <summary>
+    /// Executes a document report task and returns the results.
+    /// </summary>
+    Task<DocumentReportResult> ExecuteDocumentReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all document report results for a task.
+    /// </summary>
+    Task<List<DocumentReportResult>> GetDocumentReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent document report result for a task.
+    /// </summary>
+    Task<DocumentReportResult?> GetLatestDocumentReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a document report result.
+    /// </summary>
+    Task SaveDocumentReportResultAsync(DocumentReportResult result);
+
+    /// <summary>
+    /// Executes a permission report task and returns the results.
+    /// </summary>
+    Task<PermissionReportResult> ExecutePermissionReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all permission report results for a task.
+    /// </summary>
+    Task<List<PermissionReportResult>> GetPermissionReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent permission report result for a task.
+    /// </summary>
+    Task<PermissionReportResult?> GetLatestPermissionReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a permission report result.
+    /// </summary>
+    Task SavePermissionReportResultAsync(PermissionReportResult result);
 }
 
 /// <summary>

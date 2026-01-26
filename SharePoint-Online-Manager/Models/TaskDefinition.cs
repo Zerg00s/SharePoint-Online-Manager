@@ -13,7 +13,17 @@ public enum TaskType
     /// <summary>
     /// Compare list item counts between source and target sites.
     /// </summary>
-    ListCompare
+    ListCompare,
+
+    /// <summary>
+    /// Report on all documents/files across selected site collections.
+    /// </summary>
+    DocumentReport,
+
+    /// <summary>
+    /// Report on permissions across selected site collections.
+    /// </summary>
+    PermissionReport
 }
 
 /// <summary>
@@ -53,6 +63,8 @@ public class TaskDefinition
     {
         TaskType.ListsReport => "Lists Report",
         TaskType.ListCompare => "List Compare",
+        TaskType.DocumentReport => "Document Report",
+        TaskType.PermissionReport => "Permission Report",
         _ => Type.ToString()
     };
 
@@ -82,6 +94,8 @@ public static class TaskTypeExtensions
     {
         TaskType.ListsReport => "Report on all lists across selected sites",
         TaskType.ListCompare => "Compare list item counts between source and target sites",
+        TaskType.DocumentReport => "Report on all documents/files across selected sites",
+        TaskType.PermissionReport => "Report on permissions across selected sites",
         _ => type.ToString()
     };
 
@@ -92,6 +106,8 @@ public static class TaskTypeExtensions
     {
         TaskType.ListsReport => "Lists Report",
         TaskType.ListCompare => "List Compare",
+        TaskType.DocumentReport => "Document Report",
+        TaskType.PermissionReport => "Permission Report",
         _ => type.ToString()
     };
 

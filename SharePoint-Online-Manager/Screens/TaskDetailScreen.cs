@@ -15,11 +15,14 @@ public class TaskDetailScreen : BaseScreen
     private Button _runButton = null!;
     private Button _exportButton = null!;
     private Button _deleteButton = null!;
+    private Button _manageExclusionsButton = null!;
     private DataGridView _resultsGrid = null!;
     private TextBox _logTextBox = null!;
+    private TextBox _filterTextBox = null!;
     private TabControl _tabControl = null!;
     private ProgressBar _progressBar = null!;
     private Label _progressLabel = null!;
+    private Label _filterLabel = null!;
 
     private TaskDefinition _task = null!;
     private TaskResult? _currentResult;
@@ -27,6 +30,7 @@ public class TaskDetailScreen : BaseScreen
     private ITaskService _taskService = null!;
     private IAuthenticationService _authService = null!;
     private IConnectionManager _connectionManager = null!;
+    private HashSet<string> _excludedLists = new(StringComparer.OrdinalIgnoreCase);
 
     public override string ScreenTitle => _task?.Name ?? "Task Details";
 
@@ -89,11 +93,19 @@ public class TaskDetailScreen : BaseScreen
         _deleteButton = new Button
         {
             Text = "Delete Task",
-            Size = new Size(100, 28)
+            Size = new Size(100, 28),
+            Margin = new Padding(0, 0, 10, 0)
         };
         _deleteButton.Click += DeleteButton_Click;
 
-        buttonPanel.Controls.AddRange(new Control[] { _runButton, _exportButton, _deleteButton });
+        _manageExclusionsButton = new Button
+        {
+            Text = "Manage Exclusions",
+            Size = new Size(130, 28)
+        };
+        _manageExclusionsButton.Click += ManageExclusionsButton_Click;
+
+        buttonPanel.Controls.AddRange(new Control[] { _runButton, _exportButton, _deleteButton, _manageExclusionsButton });
 
         headerPanel.Controls.AddRange(new Control[] { _taskNameLabel, _taskInfoLabel, buttonPanel });
 
@@ -128,6 +140,33 @@ public class TaskDetailScreen : BaseScreen
 
         // Results tab
         var resultsTab = new TabPage("Results");
+
+        // Filter panel at top of results tab
+        var filterPanel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 35,
+            Padding = new Padding(5)
+        };
+
+        _filterLabel = new Label
+        {
+            Text = "Filter:",
+            AutoSize = true,
+            Location = new Point(5, 10)
+        };
+
+        _filterTextBox = new TextBox
+        {
+            Location = new Point(50, 7),
+            Size = new Size(300, 23),
+            PlaceholderText = "Type to filter by list name..."
+        };
+        _filterTextBox.TextChanged += FilterTextBox_TextChanged;
+
+        filterPanel.Controls.Add(_filterLabel);
+        filterPanel.Controls.Add(_filterTextBox);
+
         _resultsGrid = new DataGridView
         {
             Dock = DockStyle.Fill,
@@ -148,6 +187,7 @@ public class TaskDetailScreen : BaseScreen
         _resultsGrid.Columns.Add("LastModified", "Last Modified");
 
         resultsTab.Controls.Add(_resultsGrid);
+        resultsTab.Controls.Add(filterPanel);
 
         // Log tab
         var logTab = new TabPage("Execution Log");
@@ -231,9 +271,26 @@ public class TaskDetailScreen : BaseScreen
 
     private void DisplayResults(TaskResult result)
     {
+        DisplayResults(result, _filterTextBox?.Text ?? string.Empty);
+    }
+
+    private void DisplayResults(TaskResult result, string filter)
+    {
         _resultsGrid.Rows.Clear();
 
-        foreach (var item in result.GetAllListItems())
+        var items = result.GetAllListItems()
+            .Where(item => !_excludedLists.Contains(item.ListTitle));
+
+        // Apply text filter if specified
+        if (!string.IsNullOrWhiteSpace(filter))
+        {
+            items = items.Where(item =>
+                item.ListTitle.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                item.SiteTitle.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                item.SiteUrl.Contains(filter, StringComparison.OrdinalIgnoreCase));
+        }
+
+        foreach (var item in items)
         {
             var rowIndex = _resultsGrid.Rows.Add(
                 item.SiteUrl,
@@ -251,8 +308,26 @@ public class TaskDetailScreen : BaseScreen
             }
         }
 
+        // Update status with count
+        var totalCount = result.GetAllListItems().Count();
+        var excludedCount = result.GetAllListItems().Count(i => _excludedLists.Contains(i.ListTitle));
+        var displayedCount = _resultsGrid.Rows.Count;
+
+        if (_excludedLists.Count > 0 || !string.IsNullOrWhiteSpace(filter))
+        {
+            SetStatus($"Showing {displayedCount} of {totalCount} lists ({excludedCount} excluded, {totalCount - displayedCount - excludedCount} filtered)");
+        }
+
         // Display log
         _logTextBox.Text = string.Join(Environment.NewLine, result.ExecutionLog);
+    }
+
+    private void FilterTextBox_TextChanged(object? sender, EventArgs e)
+    {
+        if (_currentResult != null)
+        {
+            DisplayResults(_currentResult, _filterTextBox.Text);
+        }
     }
 
     private async void RunButton_Click(object? sender, EventArgs e)
@@ -378,8 +453,8 @@ public class TaskDetailScreen : BaseScreen
             try
             {
                 var exporter = GetRequiredService<CsvExporter>();
-                exporter.ExportListReport(_currentResult, dialog.FileName);
-                SetStatus($"Exported to {dialog.FileName}");
+                exporter.ExportListReport(_currentResult, dialog.FileName, _excludedLists);
+                SetStatus($"Exported to {dialog.FileName}" + (_excludedLists.Count > 0 ? $" ({_excludedLists.Count} lists excluded)" : ""));
 
                 var result = MessageBox.Show(
                     "Export completed. Would you like to open the file?",
@@ -417,6 +492,31 @@ public class TaskDetailScreen : BaseScreen
             await _taskService.DeleteTaskAsync(_task.Id);
             SetStatus($"Task '{_task.Name}' deleted");
             await NavigationService!.GoBackAsync();
+        }
+    }
+
+    private void ManageExclusionsButton_Click(object? sender, EventArgs e)
+    {
+        if (_currentResult == null)
+        {
+            MessageBox.Show("Run the task first to see the list of available lists to exclude.",
+                "No Results", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // Get all unique list titles from the results
+        var allLists = _currentResult.GetAllListItems()
+            .Select(i => i.ListTitle)
+            .Distinct()
+            .OrderBy(t => t)
+            .ToList();
+
+        using var dialog = new ListExclusionDialog(allLists, _excludedLists);
+        if (dialog.ShowDialog(FindForm()) == DialogResult.OK)
+        {
+            _excludedLists = new HashSet<string>(dialog.ExcludedLists, StringComparer.OrdinalIgnoreCase);
+            DisplayResults(_currentResult);
+            SetStatus($"Exclusions updated: {_excludedLists.Count} lists excluded");
         }
     }
 

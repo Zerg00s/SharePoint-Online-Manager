@@ -56,4 +56,48 @@ public interface ISharePointService : IDisposable
     /// Gets all lists from a SharePoint site with optional filtering.
     /// </summary>
     Task<SharePointResult<List<ListInfo>>> GetListsAsync(string siteUrl, bool includeHidden);
+
+    /// <summary>
+    /// Gets all files from a document library.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <param name="libraryTitle">The document library title.</param>
+    /// <param name="includeSubfolders">Whether to include files from subfolders.</param>
+    /// <param name="includeVersionCount">Whether to retrieve version count for each file.</param>
+    /// <returns>A list of document report items.</returns>
+    Task<SharePointResult<List<DocumentReportItem>>> GetDocumentLibraryFilesAsync(
+        string siteUrl,
+        string libraryTitle,
+        bool includeSubfolders = true,
+        bool includeVersionCount = true);
+
+    /// <summary>
+    /// Gets permission role assignments for a site/web.
+    /// </summary>
+    Task<SharePointResult<List<PermissionReportItem>>> GetWebPermissionsAsync(
+        string siteUrl,
+        string siteCollectionUrl,
+        bool includeInherited = false);
+
+    /// <summary>
+    /// Gets permission role assignments for a list or library.
+    /// </summary>
+    Task<SharePointResult<List<PermissionReportItem>>> GetListPermissionsAsync(
+        string siteUrl,
+        string siteCollectionUrl,
+        string listTitle,
+        bool isLibrary,
+        bool includeInherited = false);
+
+    /// <summary>
+    /// Gets items/folders with unique permissions in a list or library.
+    /// </summary>
+    Task<SharePointResult<List<PermissionReportItem>>> GetItemPermissionsAsync(
+        string siteUrl,
+        string siteCollectionUrl,
+        string listTitle,
+        bool isLibrary,
+        bool includeFolders = true,
+        bool includeItems = true,
+        bool includeInherited = false);
 }

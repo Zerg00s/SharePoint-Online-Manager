@@ -79,29 +79,43 @@ public partial class LoginForm : Form
         try
         {
             var currentUrl = _webView.Source?.ToString() ?? string.Empty;
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] Navigation completed: {currentUrl}");
 
             // Check if we've been redirected back to the SharePoint site (login complete)
             if (currentUrl.StartsWith(_siteUrl, StringComparison.OrdinalIgnoreCase) ||
                 (currentUrl.Contains(_domain) && !currentUrl.Contains("login.microsoftonline.com")))
             {
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] Detected SharePoint site, capturing cookies for domain: {_domain}");
+
                 // Try to capture cookies
                 var cookies = await _webView.CoreWebView2.CookieManager.GetCookiesAsync($"https://{_domain}");
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] Found {cookies.Count} cookies");
 
                 var fedAuth = cookies.FirstOrDefault(c => c.Name == "FedAuth")?.Value;
                 var rtFa = cookies.FirstOrDefault(c => c.Name == "rtFa")?.Value;
 
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] FedAuth: {(string.IsNullOrEmpty(fedAuth) ? "MISSING" : $"found ({fedAuth.Length} chars)")}");
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] rtFa: {(string.IsNullOrEmpty(rtFa) ? "MISSING" : $"found ({rtFa.Length} chars)")}");
+
                 if (!string.IsNullOrEmpty(fedAuth) && !string.IsNullOrEmpty(rtFa))
                 {
                     _loginComplete = true;
+
+                    // Try to get current user's email via REST API
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] Fetching current user email...");
+                    var userEmail = await GetCurrentUserEmailAsync();
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] User email result: '{userEmail}'");
 
                     CapturedCookies = new AuthCookies
                     {
                         Domain = _domain,
                         FedAuth = fedAuth,
                         RtFa = rtFa,
+                        UserEmail = userEmail,
                         CapturedAt = DateTime.UtcNow
                     };
 
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] Cookies captured successfully. Closing form.");
                     DialogResult = DialogResult.OK;
                     Close();
                 }
@@ -109,8 +123,61 @@ public partial class LoginForm : Form
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"Error checking cookies: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] Error checking cookies: {ex.Message}");
         }
+    }
+
+    private async Task<string> GetCurrentUserEmailAsync()
+    {
+        try
+        {
+            // Use synchronous XHR because ExecuteScriptAsync doesn't await Promises
+            var script = @"
+(function() {
+    try {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', '/_api/web/currentUser', false);
+        xhr.setRequestHeader('Accept', 'application/json;odata=verbose');
+        xhr.send(null);
+        console.log('XHR status:', xhr.status);
+        console.log('XHR response:', xhr.responseText);
+        if (xhr.status === 200) {
+            var data = JSON.parse(xhr.responseText);
+            return data.d.Email || data.d.UserPrincipalName || data.d.LoginName || '';
+        }
+        return 'ERROR:' + xhr.status;
+    } catch (e) {
+        return 'EXCEPTION:' + e.toString();
+    }
+})()";
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] Executing JavaScript to get current user...");
+            var result = await _webView.CoreWebView2.ExecuteScriptAsync(script);
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] JavaScript result (raw): {result}");
+
+            // Result is JSON-encoded, so remove quotes
+            if (!string.IsNullOrEmpty(result) && result != "null" && result != "\"\"")
+            {
+                var cleanResult = result.Trim('"');
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] JavaScript result (cleaned): {cleanResult}");
+
+                if (cleanResult.StartsWith("ERROR:") || cleanResult.StartsWith("EXCEPTION:"))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] JavaScript returned error: {cleanResult}");
+                    return string.Empty;
+                }
+
+                return cleanResult;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] JavaScript returned null or empty");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] Exception getting current user: {ex.Message}");
+        }
+
+        return string.Empty;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

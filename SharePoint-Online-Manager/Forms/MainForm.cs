@@ -21,6 +21,7 @@ public partial class MainForm : Form
     private ToolStripStatusLabel _statusLabel = null!;
     private ToolStripProgressBar _progressBar = null!;
     private ToolStripButton _backButton = null!;
+    private ToolStripButton _homeButton = null!;
     private ToolStripLabel _titleLabel = null!;
 
     public MainForm(IServiceProvider serviceProvider)
@@ -64,6 +65,14 @@ public partial class MainForm : Form
         };
         _backButton.Click += async (s, e) => await _navigationService.GoBackAsync();
 
+        _homeButton = new ToolStripButton
+        {
+            Text = "Home",
+            DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
+            ToolTipText = "Go to Connections"
+        };
+        _homeButton.Click += async (s, e) => await _navigationService.NavigateToHomeAsync();
+
         var separator = new ToolStripSeparator();
 
         _titleLabel = new ToolStripLabel
@@ -72,7 +81,7 @@ public partial class MainForm : Form
             Font = new Font(Font.FontFamily, 10F, FontStyle.Bold)
         };
 
-        _toolStrip.Items.AddRange(new ToolStripItem[] { _backButton, separator, _titleLabel });
+        _toolStrip.Items.AddRange(new ToolStripItem[] { _backButton, _homeButton, separator, _titleLabel });
         _toolStrip.Location = new Point(0, 24);
         _toolStrip.Name = "toolStrip";
 

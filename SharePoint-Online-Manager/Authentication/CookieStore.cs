@@ -52,9 +52,14 @@ public partial class CookieStore
     public AuthCookies? Load(string domain)
     {
         var filePath = GetCookieFilePath(domain);
+        System.Diagnostics.Debug.WriteLine($"[SPOManager] CookieStore.Load - Looking for: '{domain}' at path: '{filePath}'");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager] CookieStore.Load - File exists: {File.Exists(filePath)}");
 
         if (!File.Exists(filePath))
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] CookieStore.Load - No cookie file found for '{domain}'");
             return null;
+        }
 
         try
         {
@@ -63,13 +68,20 @@ public partial class CookieStore
             var json = System.Text.Encoding.UTF8.GetString(data);
             var cookies = JsonSerializer.Deserialize<AuthCookies>(json);
 
-            if (cookies != null && cookies.Domain.Equals(domain, StringComparison.OrdinalIgnoreCase))
-                return cookies;
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] CookieStore.Load - Loaded cookies, Domain in file: '{cookies?.Domain}'");
 
+            if (cookies != null && cookies.Domain.Equals(domain, StringComparison.OrdinalIgnoreCase))
+            {
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] CookieStore.Load - Domain matches, returning cookies");
+                return cookies;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] CookieStore.Load - Domain mismatch: requested '{domain}' vs stored '{cookies?.Domain}'");
             return null;
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] CookieStore.Load - Exception: {ex.Message}");
             return null;
         }
     }

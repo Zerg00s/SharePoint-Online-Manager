@@ -1,6 +1,46 @@
 namespace SharePointOnlineManager.Models;
 
 /// <summary>
+/// Configuration for a lists report task.
+/// </summary>
+public class ListReportConfiguration
+{
+    public Guid ConnectionId { get; set; }
+    public List<string> TargetSiteUrls { get; set; } = [];
+    public List<string> ExcludedLists { get; set; } = [];
+    public bool IncludeHiddenLists { get; set; } = false;
+    public bool ExcludeSystemLists { get; set; } = true;
+
+    /// <summary>
+    /// Gets the default list of system lists that should be excluded by default.
+    /// </summary>
+    public static List<string> DefaultExcludedLists =>
+    [
+        "MicroFeed",
+        "Style Library",
+        "appdata",
+        "TaxonomyHiddenList",
+        "Composed Looks",
+        "Master Page Gallery",
+        "Solution Gallery",
+        "Theme Gallery",
+        "Web Part Gallery",
+        "Workflow Tasks",
+        "User Information List",
+        "Converted Forms",
+        "Customized Reports",
+        "Form Templates",
+        "Content type publishing error log",
+        "Team Message History",
+        "Channel Settings",
+        "App Catalog",
+        "Apps for Office",
+        "Apps for SharePoint",
+        "DO_NOT_DELETE_SPLIST_SITECOLLECTION_AGGREGATED_CONTENTTYPES"
+    ];
+}
+
+/// <summary>
 /// Represents the results from executing a task.
 /// </summary>
 public class TaskResult

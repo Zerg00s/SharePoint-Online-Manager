@@ -14,6 +14,7 @@ public class HomeScreen : BaseScreen
     private Button _newAdminConnectionButton = null!;
     private Button _newSiteConnectionButton = null!;
     private Button _connectButton = null!;
+    private Button _reauthButton = null!;
     private Button _deleteButton = null!;
     private Button _listCompareButton = null!;
     private IConnectionManager _connectionManager = null!;
@@ -67,6 +68,15 @@ public class HomeScreen : BaseScreen
         };
         _connectButton.Click += ConnectButton_Click;
 
+        _reauthButton = new Button
+        {
+            Text = "Re-authenticate",
+            Size = new Size(110, 32),
+            Margin = new Padding(0, 0, 10, 0),
+            Enabled = false
+        };
+        _reauthButton.Click += ReauthButton_Click;
+
         _deleteButton = new Button
         {
             Text = "Delete",
@@ -88,6 +98,7 @@ public class HomeScreen : BaseScreen
             _newAdminConnectionButton,
             _newSiteConnectionButton,
             _connectButton,
+            _reauthButton,
             _deleteButton,
             _listCompareButton
         });
@@ -101,11 +112,11 @@ public class HomeScreen : BaseScreen
             GridLines = true,
             MultiSelect = false
         };
-        _connectionsListView.Columns.Add("Name", 200);
-        _connectionsListView.Columns.Add("Type", 120);
-        _connectionsListView.Columns.Add("Tenant/URL", 300);
-        _connectionsListView.Columns.Add("Last Connected", 150);
-        _connectionsListView.Columns.Add("Credentials", 100);
+        _connectionsListView.Columns.Add("Name", 180);
+        _connectionsListView.Columns.Add("Type", 100);
+        _connectionsListView.Columns.Add("Tenant/URL", 280);
+        _connectionsListView.Columns.Add("Last Connected", 130);
+        _connectionsListView.Columns.Add("Account", 200);
 
         _connectionsListView.SelectedIndexChanged += ConnectionsListView_SelectedIndexChanged;
         _connectionsListView.DoubleClick += ConnectionsListView_DoubleClick;
@@ -151,12 +162,33 @@ public class HomeScreen : BaseScreen
             item.SubItems.Add(conn.LastConnectedAt?.ToString("g") ?? "Never");
 
             var hasCredentials = _connectionManager.HasStoredCredentials(conn);
-            item.SubItems.Add(hasCredentials ? "Stored" : "None");
-
+            var credentialDisplay = "None";
             if (hasCredentials)
             {
+                // Try to get the user email from stored cookies
+                // Check both admin domain and tenant domain for Admin connections
+                AuthCookies? cookies = null;
+                if (conn.Type == ConnectionType.Admin)
+                {
+                    cookies = _authService.GetStoredCookies(conn.AdminDomain)
+                              ?? _authService.GetStoredCookies(conn.TenantDomain);
+                }
+                else if (!string.IsNullOrEmpty(conn.SiteUrl))
+                {
+                    cookies = _authService.GetStoredCookies(new Uri(conn.SiteUrl).Host);
+                }
+
+                if (cookies != null && !string.IsNullOrEmpty(cookies.UserEmail))
+                {
+                    credentialDisplay = cookies.UserEmail;
+                }
+                else
+                {
+                    credentialDisplay = "Stored";
+                }
                 item.BackColor = Color.FromArgb(230, 255, 230);
             }
+            item.SubItems.Add(credentialDisplay);
 
             _connectionsListView.Items.Add(item);
         }
@@ -173,6 +205,7 @@ public class HomeScreen : BaseScreen
     {
         var hasSelection = _connectionsListView.SelectedItems.Count > 0;
         _connectButton.Enabled = hasSelection;
+        _reauthButton.Enabled = hasSelection;
         _deleteButton.Enabled = hasSelection;
     }
 
@@ -258,6 +291,53 @@ public class HomeScreen : BaseScreen
             await _connectionManager.SaveConnectionAsync(dialog.Connection);
             await RefreshConnectionsAsync();
             SetStatus($"Connection '{dialog.Connection.Name}' created");
+        }
+    }
+
+    private async void ReauthButton_Click(object? sender, EventArgs e)
+    {
+        if (_connectionsListView.SelectedItems.Count == 0)
+            return;
+
+        var connection = (Connection)_connectionsListView.SelectedItems[0].Tag;
+
+        // Clear stored credentials for this connection
+        if (connection.Type == ConnectionType.Admin)
+        {
+            _authService.ClearCredentials(connection.AdminDomain);
+            _authService.ClearCredentials(connection.TenantDomain);
+        }
+        else if (!string.IsNullOrEmpty(connection.SiteUrl))
+        {
+            _authService.ClearCredentials(new Uri(connection.SiteUrl).Host);
+        }
+
+        // Clear the WebView2 cache to force fresh login
+        try
+        {
+            var webView2Folder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "SharePointOnlineManager", "WebView2");
+
+            if (Directory.Exists(webView2Folder))
+            {
+                Directory.Delete(webView2Folder, true);
+                SetStatus("Browser cache cleared");
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Warning: Could not clear browser cache: {ex.Message}");
+        }
+
+        // Now authenticate fresh
+        var authenticated = await AuthenticateAsync(connection);
+        if (authenticated)
+        {
+            connection.LastConnectedAt = DateTime.UtcNow;
+            await _connectionManager.SaveConnectionAsync(connection);
+            await RefreshConnectionsAsync();
+            SetStatus($"Re-authenticated to '{connection.Name}'");
         }
     }
 
