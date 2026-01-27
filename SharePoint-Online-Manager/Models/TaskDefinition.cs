@@ -28,7 +28,17 @@ public enum TaskType
     /// <summary>
     /// Set site state (Unlock, ReadOnly, NoAccess) for selected site collections.
     /// </summary>
-    SetSiteState
+    SetSiteState,
+
+    /// <summary>
+    /// Add site collection administrators to selected site collections.
+    /// </summary>
+    AddSiteCollectionAdmins,
+
+    /// <summary>
+    /// Remove site collection administrators from selected site collections.
+    /// </summary>
+    RemoveSiteCollectionAdmins
 }
 
 /// <summary>
@@ -71,6 +81,8 @@ public class TaskDefinition
         TaskType.DocumentReport => "Document Report",
         TaskType.PermissionReport => "Permission Report",
         TaskType.SetSiteState => "Set Site State",
+        TaskType.AddSiteCollectionAdmins => "Add Site Admins",
+        TaskType.RemoveSiteCollectionAdmins => "Remove Site Admins",
         _ => Type.ToString()
     };
 
@@ -103,6 +115,8 @@ public static class TaskTypeExtensions
         TaskType.DocumentReport => "Report on all documents/files across selected sites",
         TaskType.PermissionReport => "Report on permissions across selected sites",
         TaskType.SetSiteState => "Set site state: Unlock, ReadOnly, or NoAccess",
+        TaskType.AddSiteCollectionAdmins => "Add up to 5 site collection administrators",
+        TaskType.RemoveSiteCollectionAdmins => "Remove up to 5 site collection administrators",
         _ => type.ToString()
     };
 
@@ -116,6 +130,8 @@ public static class TaskTypeExtensions
         TaskType.DocumentReport => "Document Report",
         TaskType.PermissionReport => "Permission Report",
         TaskType.SetSiteState => "Set Site State",
+        TaskType.AddSiteCollectionAdmins => "Add Site Collection Administrators",
+        TaskType.RemoveSiteCollectionAdmins => "Remove Site Collection Administrators",
         _ => type.ToString()
     };
 

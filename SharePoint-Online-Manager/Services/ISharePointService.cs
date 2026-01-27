@@ -114,4 +114,30 @@ public interface ISharePointService : IDisposable
     /// <param name="siteUrl">The URL of the site collection to delete.</param>
     /// <returns>A result indicating success or failure.</returns>
     Task<SharePointResult<bool>> DeleteSiteCollectionAsync(string siteUrl);
+
+    /// <summary>
+    /// Searches for users in SharePoint/Azure AD using the people picker API.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL to use for the search context.</param>
+    /// <param name="queryString">The search query string.</param>
+    /// <returns>A list of matching users.</returns>
+    Task<SharePointResult<List<UserSearchResult>>> SearchUsersAsync(string siteUrl, string queryString);
+
+    /// <summary>
+    /// Adds a user as a site collection administrator.
+    /// Requires SharePoint Admin permissions.
+    /// </summary>
+    /// <param name="siteUrl">The URL of the site collection.</param>
+    /// <param name="userLoginName">The login name of the user to add as admin.</param>
+    /// <returns>A result indicating success or failure.</returns>
+    Task<SharePointResult<bool>> AddSiteCollectionAdminAsync(string siteUrl, string userLoginName);
+
+    /// <summary>
+    /// Removes a user as a site collection administrator.
+    /// Requires SharePoint Admin permissions.
+    /// </summary>
+    /// <param name="siteUrl">The URL of the site collection.</param>
+    /// <param name="userLoginName">The login name of the user to remove as admin.</param>
+    /// <returns>A result indicating success or failure.</returns>
+    Task<SharePointResult<bool>> RemoveSiteCollectionAdminAsync(string siteUrl, string userLoginName);
 }

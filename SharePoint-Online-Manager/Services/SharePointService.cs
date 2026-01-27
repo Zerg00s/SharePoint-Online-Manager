@@ -1415,6 +1415,448 @@ public class SharePointService : ISharePointService
 
     #endregion
 
+    #region User Search and Site Admin Methods
+
+    public async Task<SharePointResult<List<UserSearchResult>>> SearchUsersAsync(string siteUrl, string queryString)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(queryString) || queryString.Length < 2)
+            {
+                return new SharePointResult<List<UserSearchResult>>
+                {
+                    Data = [],
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            var baseUrl = siteUrl.TrimEnd('/');
+            var apiUrl = $"{baseUrl}/_api/SP.UI.ApplicationPages.ClientPeoplePickerWebServiceInterface.ClientPeoplePickerSearchUser";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SearchUsersAsync - URL: {apiUrl}, Query: {queryString}");
+
+            // Get request digest first
+            var digestUrl = $"{baseUrl}/_api/contextinfo";
+            var digestResponse = await _client.PostAsync(digestUrl, new StringContent(""));
+            string? formDigestValue = null;
+
+            if (digestResponse.IsSuccessStatusCode)
+            {
+                var digestJson = await digestResponse.Content.ReadAsStringAsync();
+                using var digestDoc = JsonDocument.Parse(digestJson);
+                formDigestValue = GetStringProperty(digestDoc.RootElement, "FormDigestValue");
+
+                if (string.IsNullOrEmpty(formDigestValue))
+                {
+                    if (digestDoc.RootElement.TryGetProperty("d", out var dElement) &&
+                        dElement.TryGetProperty("GetContextWebInformation", out var webInfo))
+                    {
+                        formDigestValue = GetStringProperty(webInfo, "FormDigestValue");
+                    }
+                }
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] SearchUsersAsync - Got digest: {!string.IsNullOrEmpty(formDigestValue)}");
+            }
+
+            // Build the people picker query
+            var queryParams = new
+            {
+                queryParams = new
+                {
+                    AllowEmailAddresses = true,
+                    AllowMultipleEntities = false,
+                    AllUrlZones = false,
+                    MaximumEntitySuggestions = 10,
+                    PrincipalSource = 15, // All sources
+                    PrincipalType = 1, // Users only (1=User, 4=SecurityGroup, 8=SharePointGroup)
+                    QueryString = queryString
+                }
+            };
+
+            var requestBody = JsonSerializer.Serialize(queryParams);
+            var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+
+            var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
+            {
+                Content = content
+            };
+
+            if (!string.IsNullOrEmpty(formDigestValue))
+            {
+                request.Headers.Add("X-RequestDigest", formDigestValue);
+            }
+
+            var response = await _client.SendAsync(request);
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SearchUsersAsync - Response status: {response.StatusCode}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] SearchUsersAsync - Error: {errorContent}");
+                return new SharePointResult<List<UserSearchResult>>
+                {
+                    Status = GetSharePointStatus(response.StatusCode),
+                    ErrorMessage = GetErrorMessage(response.StatusCode)
+                };
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SearchUsersAsync - Response: {json.Substring(0, Math.Min(500, json.Length))}");
+            var users = ParsePeoplePickerResults(json);
+
+            return new SharePointResult<List<UserSearchResult>>
+            {
+                Data = users,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (HttpRequestException ex)
+        {
+            return new SharePointResult<List<UserSearchResult>>
+            {
+                Status = ex.StatusCode switch
+                {
+                    HttpStatusCode.Unauthorized => SharePointResultStatus.AuthenticationRequired,
+                    HttpStatusCode.Forbidden => SharePointResultStatus.AccessDenied,
+                    HttpStatusCode.NotFound => SharePointResultStatus.NotFound,
+                    _ => SharePointResultStatus.Error
+                },
+                ErrorMessage = ex.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<List<UserSearchResult>>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    private static List<UserSearchResult> ParsePeoplePickerResults(string json)
+    {
+        var users = new List<UserSearchResult>();
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // The result is in "value" property as a JSON string that needs to be parsed again
+            string? valueString = null;
+            if (root.TryGetProperty("value", out var valueElement))
+            {
+                valueString = valueElement.GetString();
+            }
+            else if (root.TryGetProperty("d", out var dElement) &&
+                     dElement.TryGetProperty("ClientPeoplePickerSearchUser", out var searchElement))
+            {
+                valueString = searchElement.GetString();
+            }
+
+            if (string.IsNullOrEmpty(valueString))
+                return users;
+
+            // Parse the nested JSON array
+            using var resultsDoc = JsonDocument.Parse(valueString);
+            var resultsArray = resultsDoc.RootElement;
+
+            foreach (var item in resultsArray.EnumerateArray())
+            {
+                var displayName = GetStringProperty(item, "DisplayText");
+                var entityType = GetStringProperty(item, "EntityType");
+
+                // Get entity data for email and login name
+                var email = string.Empty;
+                var loginName = string.Empty;
+
+                if (item.TryGetProperty("EntityData", out var entityData))
+                {
+                    email = GetStringProperty(entityData, "Email");
+                }
+
+                if (item.TryGetProperty("Key", out var keyProp))
+                {
+                    loginName = keyProp.GetString() ?? string.Empty;
+                }
+
+                if (!string.IsNullOrEmpty(displayName))
+                {
+                    users.Add(new UserSearchResult
+                    {
+                        DisplayName = displayName,
+                        Email = email,
+                        LoginName = loginName,
+                        EntityType = entityType
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] ParsePeoplePickerResults - Exception: {ex.Message}");
+        }
+
+        return users;
+    }
+
+    public async Task<SharePointResult<bool>> AddSiteCollectionAdminAsync(string siteUrl, string userLoginName)
+    {
+        try
+        {
+            // Extract tenant name from URL to construct admin URL
+            var siteUri = new Uri(siteUrl);
+            var hostParts = siteUri.Host.Split('.');
+            if (hostParts.Length < 3)
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = SharePointResultStatus.Error,
+                    ErrorMessage = "Invalid SharePoint URL format"
+                };
+            }
+
+            var tenantName = hostParts[0];
+            var adminUrl = $"https://{tenantName}-admin.sharepoint.com";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] AddSiteCollectionAdmin - SiteUrl: {siteUrl}, User: {userLoginName}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] AddSiteCollectionAdmin - Admin URL: {adminUrl}");
+
+            // Get request digest for POST operation
+            var digestUrl = $"{adminUrl}/_api/contextinfo";
+            var digestResponse = await _client.PostAsync(digestUrl, new StringContent(""));
+
+            if (!digestResponse.IsSuccessStatusCode)
+            {
+                var digestError = await digestResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] AddSiteCollectionAdmin - Digest error: {digestError}");
+                return new SharePointResult<bool>
+                {
+                    Status = GetSharePointStatus(digestResponse.StatusCode),
+                    ErrorMessage = $"Failed to get request digest: {digestResponse.StatusCode}"
+                };
+            }
+
+            var digestJson = await digestResponse.Content.ReadAsStringAsync();
+            using var digestDoc = JsonDocument.Parse(digestJson);
+            var formDigestValue = GetStringProperty(digestDoc.RootElement, "FormDigestValue");
+
+            if (string.IsNullOrEmpty(formDigestValue))
+            {
+                if (digestDoc.RootElement.TryGetProperty("d", out var dElement) &&
+                    dElement.TryGetProperty("GetContextWebInformation", out var webInfo))
+                {
+                    formDigestValue = GetStringProperty(webInfo, "FormDigestValue");
+                }
+            }
+
+            // Use CSOM ProcessQuery endpoint with Tenant.SetSiteAdmin
+            var apiUrl = $"{adminUrl}/_vti_bin/client.svc/ProcessQuery";
+
+            // CSOM XML request to add site collection admin
+            var csomRequest = $@"<Request xmlns=""http://schemas.microsoft.com/sharepoint/clientquery/2009"" SchemaVersion=""15.0.0.0"" LibraryVersion=""16.0.0.0"" ApplicationName=""SharePoint Online Manager"">
+  <Actions>
+    <ObjectPath Id=""1"" ObjectPathId=""0"" />
+    <Method Name=""SetSiteAdmin"" Id=""2"" ObjectPathId=""0"">
+      <Parameters>
+        <Parameter Type=""String"">{System.Security.SecurityElement.Escape(siteUrl)}</Parameter>
+        <Parameter Type=""String"">{System.Security.SecurityElement.Escape(userLoginName)}</Parameter>
+        <Parameter Type=""Boolean"">true</Parameter>
+      </Parameters>
+    </Method>
+  </Actions>
+  <ObjectPaths>
+    <Constructor Id=""0"" TypeId=""{{268004ae-ef6b-4e9b-8425-127220d84719}}"" />
+  </ObjectPaths>
+</Request>";
+
+            var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
+            {
+                Content = new StringContent(csomRequest, System.Text.Encoding.UTF8, "text/xml")
+            };
+
+            if (!string.IsNullOrEmpty(formDigestValue))
+            {
+                request.Headers.Add("X-RequestDigest", formDigestValue);
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] AddSiteCollectionAdmin - Sending CSOM request");
+
+            var response = await _client.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] AddSiteCollectionAdmin - Response: {response.StatusCode}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] AddSiteCollectionAdmin - Content: {responseContent}");
+
+            if (response.IsSuccessStatusCode)
+            {
+                // Check if the CSOM response contains an error
+                if (responseContent.Contains("ErrorInfo") && responseContent.Contains("ErrorMessage"))
+                {
+                    // Extract error message from CSOM response
+                    var errorStart = responseContent.IndexOf("ErrorMessage");
+                    var errorEnd = responseContent.IndexOf(",", errorStart);
+                    var errorMsg = errorStart > 0 && errorEnd > errorStart
+                        ? responseContent.Substring(errorStart, errorEnd - errorStart)
+                        : "CSOM operation failed";
+
+                    return new SharePointResult<bool>
+                    {
+                        Data = false,
+                        Status = SharePointResultStatus.Error,
+                        ErrorMessage = errorMsg
+                    };
+                }
+
+                return new SharePointResult<bool>
+                {
+                    Data = true,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = GetSharePointStatus(response.StatusCode),
+                ErrorMessage = $"{response.StatusCode}: {responseContent}"
+            };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] AddSiteCollectionAdmin - Exception: {ex.Message}");
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    public async Task<SharePointResult<bool>> RemoveSiteCollectionAdminAsync(string siteUrl, string userLoginName)
+    {
+        try
+        {
+            var siteUri = new Uri(siteUrl);
+            var hostParts = siteUri.Host.Split('.');
+            if (hostParts.Length < 3)
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = SharePointResultStatus.Error,
+                    ErrorMessage = "Invalid SharePoint URL format"
+                };
+            }
+
+            var tenantName = hostParts[0];
+            var adminUrl = $"https://{tenantName}-admin.sharepoint.com";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] RemoveSiteCollectionAdmin - SiteUrl: {siteUrl}, User: {userLoginName}");
+
+            var digestUrl = $"{adminUrl}/_api/contextinfo";
+            var digestResponse = await _client.PostAsync(digestUrl, new StringContent(""));
+
+            if (!digestResponse.IsSuccessStatusCode)
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = GetSharePointStatus(digestResponse.StatusCode),
+                    ErrorMessage = $"Failed to get request digest: {digestResponse.StatusCode}"
+                };
+            }
+
+            var digestJson = await digestResponse.Content.ReadAsStringAsync();
+            using var digestDoc = JsonDocument.Parse(digestJson);
+            var formDigestValue = GetStringProperty(digestDoc.RootElement, "FormDigestValue");
+
+            if (string.IsNullOrEmpty(formDigestValue))
+            {
+                if (digestDoc.RootElement.TryGetProperty("d", out var dElement) &&
+                    dElement.TryGetProperty("GetContextWebInformation", out var webInfo))
+                {
+                    formDigestValue = GetStringProperty(webInfo, "FormDigestValue");
+                }
+            }
+
+            var apiUrl = $"{adminUrl}/_vti_bin/client.svc/ProcessQuery";
+
+            // CSOM XML request to remove site collection admin (false instead of true)
+            var csomRequest = $@"<Request xmlns=""http://schemas.microsoft.com/sharepoint/clientquery/2009"" SchemaVersion=""15.0.0.0"" LibraryVersion=""16.0.0.0"" ApplicationName=""SharePoint Online Manager"">
+  <Actions>
+    <ObjectPath Id=""1"" ObjectPathId=""0"" />
+    <Method Name=""SetSiteAdmin"" Id=""2"" ObjectPathId=""0"">
+      <Parameters>
+        <Parameter Type=""String"">{System.Security.SecurityElement.Escape(siteUrl)}</Parameter>
+        <Parameter Type=""String"">{System.Security.SecurityElement.Escape(userLoginName)}</Parameter>
+        <Parameter Type=""Boolean"">false</Parameter>
+      </Parameters>
+    </Method>
+  </Actions>
+  <ObjectPaths>
+    <Constructor Id=""0"" TypeId=""{{268004ae-ef6b-4e9b-8425-127220d84719}}"" />
+  </ObjectPaths>
+</Request>";
+
+            var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
+            {
+                Content = new StringContent(csomRequest, System.Text.Encoding.UTF8, "text/xml")
+            };
+
+            if (!string.IsNullOrEmpty(formDigestValue))
+            {
+                request.Headers.Add("X-RequestDigest", formDigestValue);
+            }
+
+            var response = await _client.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] RemoveSiteCollectionAdmin - Response: {response.StatusCode}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] RemoveSiteCollectionAdmin - Content: {responseContent}");
+
+            if (response.IsSuccessStatusCode)
+            {
+                if (responseContent.Contains("ErrorInfo") && responseContent.Contains("ErrorMessage"))
+                {
+                    var errorStart = responseContent.IndexOf("ErrorMessage");
+                    var errorEnd = responseContent.IndexOf(",", errorStart);
+                    var errorMsg = errorStart > 0 && errorEnd > errorStart
+                        ? responseContent.Substring(errorStart, errorEnd - errorStart)
+                        : "CSOM operation failed";
+
+                    return new SharePointResult<bool>
+                    {
+                        Data = false,
+                        Status = SharePointResultStatus.Error,
+                        ErrorMessage = errorMsg
+                    };
+                }
+
+                return new SharePointResult<bool>
+                {
+                    Data = true,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = GetSharePointStatus(response.StatusCode),
+                ErrorMessage = $"{response.StatusCode}: {responseContent}"
+            };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] RemoveSiteCollectionAdmin - Exception: {ex.Message}");
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    #endregion
+
     public void Dispose()
     {
         if (!_disposed)

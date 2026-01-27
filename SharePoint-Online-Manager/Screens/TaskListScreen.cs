@@ -253,6 +253,18 @@ public class TaskListScreen : BaseScreen
         {
             await NavigationService!.NavigateToAsync<PermissionReportDetailScreen>(task);
         }
+        else if (task.Type == TaskType.SetSiteState)
+        {
+            await NavigationService!.NavigateToAsync<SetSiteStateDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.AddSiteCollectionAdmins)
+        {
+            await NavigationService!.NavigateToAsync<AddSiteAdminsDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.RemoveSiteCollectionAdmins)
+        {
+            await NavigationService!.NavigateToAsync<RemoveSiteAdminsDetailScreen>(task);
+        }
         else
         {
             await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
@@ -284,6 +296,18 @@ public class TaskListScreen : BaseScreen
         else if (task.Type == TaskType.PermissionReport)
         {
             await NavigationService!.NavigateToAsync<PermissionReportDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.SetSiteState)
+        {
+            await NavigationService!.NavigateToAsync<SetSiteStateDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.AddSiteCollectionAdmins)
+        {
+            await NavigationService!.NavigateToAsync<AddSiteAdminsDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.RemoveSiteCollectionAdmins)
+        {
+            await NavigationService!.NavigateToAsync<RemoveSiteAdminsDetailScreen>(execParam);
         }
         else
         {

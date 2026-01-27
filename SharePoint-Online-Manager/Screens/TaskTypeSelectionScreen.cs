@@ -172,11 +172,28 @@ public class TaskTypeSelectionScreen : BaseScreen
         TaskType.DocumentReport => "\U0001F4C1", // file folder emoji (documents)
         TaskType.PermissionReport => "\U0001F512", // lock emoji (permissions)
         TaskType.SetSiteState => "\u2699", // gear emoji (settings)
+        TaskType.AddSiteCollectionAdmins => "\U0001F464", // bust in silhouette emoji (user/admin)
+        TaskType.RemoveSiteCollectionAdmins => "\U0001F6AB", // no entry sign emoji (remove)
         _ => "\U0001F4C4" // page emoji
     };
 
     private async void OnTaskTypeSelected(TaskType taskType)
     {
+        System.Diagnostics.Debug.WriteLine($"[TaskTypeSelection] OnTaskTypeSelected: {taskType}");
+
+        // AddSiteCollectionAdmins and RemoveSiteCollectionAdmins have their own configuration screens
+        if (taskType == TaskType.AddSiteCollectionAdmins)
+        {
+            await NavigationService!.NavigateToAsync<AddSiteAdminsConfigScreen>(_context);
+            return;
+        }
+
+        if (taskType == TaskType.RemoveSiteCollectionAdmins)
+        {
+            await NavigationService!.NavigateToAsync<RemoveSiteAdminsConfigScreen>(_context);
+            return;
+        }
+
         using var dialog = new CreateTaskDialog(_context.SelectedSites.Count, taskType);
         if (dialog.ShowDialog(FindForm()) == DialogResult.OK && !string.IsNullOrWhiteSpace(dialog.TaskName))
         {
