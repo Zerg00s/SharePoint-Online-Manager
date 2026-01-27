@@ -41,6 +41,11 @@ public interface INavigationService
     void SetStatus(string message);
 
     /// <summary>
+    /// Updates the title bar with the current screen's title.
+    /// </summary>
+    void UpdateTitle();
+
+    /// <summary>
     /// Shows a loading indicator with a message.
     /// </summary>
     void ShowLoading(string message = "Loading...");

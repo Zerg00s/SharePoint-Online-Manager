@@ -222,4 +222,12 @@ public class NavigationService : INavigationService
     {
         _loadingHider();
     }
+
+    public void UpdateTitle()
+    {
+        if (CurrentScreen != null)
+        {
+            _titleUpdater(CurrentScreen.ScreenTitle);
+        }
+    }
 }

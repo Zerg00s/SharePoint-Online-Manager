@@ -45,52 +45,76 @@ public class HomeScreen : BaseScreen
 
         _newAdminConnectionButton = new Button
         {
-            Text = "New Admin Connection",
-            Size = new Size(150, 32),
-            Margin = new Padding(0, 0, 10, 0)
+            Text = "\u2795 New Admin Connection", // Plus sign
+            Size = new Size(170, 32),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 120, 212),
+            ForeColor = Color.White
         };
+        _newAdminConnectionButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _newAdminConnectionButton.FlatAppearance.BorderSize = 1;
         _newAdminConnectionButton.Click += NewAdminConnectionButton_Click;
 
         _newSiteConnectionButton = new Button
         {
-            Text = "New Site Connection",
-            Size = new Size(150, 32),
-            Margin = new Padding(0, 0, 20, 0)
+            Text = "\u2795 New Site Connection", // Plus sign
+            Size = new Size(160, 32),
+            Margin = new Padding(0, 0, 20, 0),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 120, 212),
+            ForeColor = Color.White
         };
+        _newSiteConnectionButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _newSiteConnectionButton.FlatAppearance.BorderSize = 1;
         _newSiteConnectionButton.Click += NewSiteConnectionButton_Click;
 
         _connectButton = new Button
         {
-            Text = "Connect",
+            Text = "\U0001F517 Connect", // Link emoji
             Size = new Size(100, 32),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _connectButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _connectButton.FlatAppearance.BorderSize = 1;
         _connectButton.Click += ConnectButton_Click;
 
         _reauthButton = new Button
         {
-            Text = "Re-authenticate",
-            Size = new Size(110, 32),
+            Text = "\U0001F511 Re-authenticate", // Key emoji
+            Size = new Size(130, 32),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _reauthButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _reauthButton.FlatAppearance.BorderSize = 1;
         _reauthButton.Click += ReauthButton_Click;
 
         _deleteButton = new Button
         {
-            Text = "Delete",
-            Size = new Size(80, 32),
-            Enabled = false
+            Text = "\U0001F5D1 Delete", // Wastebasket emoji
+            Size = new Size(90, 32),
+            Margin = new Padding(0, 0, 10, 0),
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.DarkRed
         };
+        _deleteButton.FlatAppearance.BorderColor = Color.DarkRed;
+        _deleteButton.FlatAppearance.BorderSize = 1;
         _deleteButton.Click += DeleteButton_Click;
 
         _listCompareButton = new Button
         {
-            Text = "List Compare",
-            Size = new Size(110, 32),
-            Margin = new Padding(20, 0, 0, 0)
+            Text = "\U0001F504 List Compare", // Arrows clockwise emoji
+            Size = new Size(130, 32),
+            Margin = new Padding(20, 0, 0, 0),
+            FlatStyle = FlatStyle.Flat
         };
+        _listCompareButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _listCompareButton.FlatAppearance.BorderSize = 1;
         _listCompareButton.Click += ListCompareButton_Click;
 
         headerPanel.Controls.AddRange(new Control[]
@@ -112,11 +136,13 @@ public class HomeScreen : BaseScreen
             GridLines = true,
             MultiSelect = false
         };
-        _connectionsListView.Columns.Add("Name", 180);
-        _connectionsListView.Columns.Add("Type", 100);
-        _connectionsListView.Columns.Add("Tenant/URL", 280);
-        _connectionsListView.Columns.Add("Last Connected", 130);
-        _connectionsListView.Columns.Add("Account", 200);
+        _connectionsListView.Columns.Add("Name", 130);
+        _connectionsListView.Columns.Add("Type", 65);
+        _connectionsListView.Columns.Add("Tenant/URL", 160);
+        _connectionsListView.Columns.Add("Account", 150);
+        _connectionsListView.Columns.Add("Token Expires", 160);
+        _connectionsListView.Columns.Add("Token Life", 65);
+        _connectionsListView.Columns.Add("Last Connected", 100);
 
         _connectionsListView.SelectedIndexChanged += ConnectionsListView_SelectedIndexChanged;
         _connectionsListView.DoubleClick += ConnectionsListView_DoubleClick;
@@ -159,13 +185,15 @@ public class HomeScreen : BaseScreen
             };
             item.SubItems.Add(conn.Type.ToString());
             item.SubItems.Add(conn.Type == ConnectionType.Admin ? conn.TenantName : conn.SiteUrl ?? "");
-            item.SubItems.Add(conn.LastConnectedAt?.ToString("g") ?? "Never");
 
             var hasCredentials = _connectionManager.HasStoredCredentials(conn);
             var credentialDisplay = "None";
+            var expirationDisplay = "-";
+            var tokenLifeDisplay = "-";
+
             if (hasCredentials)
             {
-                // Try to get the user email from stored cookies
+                // Try to get the user email and expiration from stored cookies
                 // Check both admin domain and tenant domain for Admin connections
                 AuthCookies? cookies = null;
                 if (conn.Type == ConnectionType.Admin)
@@ -178,17 +206,37 @@ public class HomeScreen : BaseScreen
                     cookies = _authService.GetStoredCookies(new Uri(conn.SiteUrl).Host);
                 }
 
-                if (cookies != null && !string.IsNullOrEmpty(cookies.UserEmail))
+                if (cookies != null)
                 {
-                    credentialDisplay = cookies.UserEmail;
+                    credentialDisplay = !string.IsNullOrEmpty(cookies.UserEmail) ? cookies.UserEmail : "Stored";
+                    expirationDisplay = cookies.ExpirationDisplay;
+                    tokenLifeDisplay = cookies.TotalDurationDisplay;
+
+                    // Color code based on expiration status
+                    if (cookies.IsExpired)
+                    {
+                        item.BackColor = Color.FromArgb(255, 200, 200); // Red - expired
+                    }
+                    else if (cookies.TimeRemaining.HasValue && cookies.TimeRemaining.Value.TotalHours < 1)
+                    {
+                        item.BackColor = Color.FromArgb(255, 255, 200); // Yellow - expiring soon
+                    }
+                    else
+                    {
+                        item.BackColor = Color.FromArgb(230, 255, 230); // Green - valid
+                    }
                 }
                 else
                 {
                     credentialDisplay = "Stored";
+                    item.BackColor = Color.FromArgb(230, 255, 230);
                 }
-                item.BackColor = Color.FromArgb(230, 255, 230);
             }
+
             item.SubItems.Add(credentialDisplay);
+            item.SubItems.Add(expirationDisplay);
+            item.SubItems.Add(tokenLifeDisplay);
+            item.SubItems.Add(conn.LastConnectedAt?.ToString("g") ?? "Never");
 
             _connectionsListView.Items.Add(item);
         }

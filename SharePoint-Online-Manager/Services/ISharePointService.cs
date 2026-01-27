@@ -1,4 +1,5 @@
 using SharePointOnlineManager.Models;
+using SharePointOnlineManager.Screens;
 
 namespace SharePointOnlineManager.Services;
 
@@ -58,6 +59,11 @@ public interface ISharePointService : IDisposable
     Task<SharePointResult<List<ListInfo>>> GetListsAsync(string siteUrl, bool includeHidden);
 
     /// <summary>
+    /// Gets all subsites (subwebs) of a SharePoint site.
+    /// </summary>
+    Task<List<SubsiteInfo>> GetSubsitesAsync(string siteUrl);
+
+    /// <summary>
     /// Gets all files from a document library.
     /// </summary>
     /// <param name="siteUrl">The SharePoint site URL.</param>
@@ -100,4 +106,12 @@ public interface ISharePointService : IDisposable
         bool includeFolders = true,
         bool includeItems = true,
         bool includeInherited = false);
+
+    /// <summary>
+    /// Deletes a site collection (sends to recycle bin).
+    /// Requires SharePoint Admin or Site Collection Administrator permissions.
+    /// </summary>
+    /// <param name="siteUrl">The URL of the site collection to delete.</param>
+    /// <returns>A result indicating success or failure.</returns>
+    Task<SharePointResult<bool>> DeleteSiteCollectionAsync(string siteUrl);
 }

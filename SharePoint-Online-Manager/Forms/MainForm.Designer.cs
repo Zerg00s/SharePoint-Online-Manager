@@ -26,6 +26,14 @@ partial class MainForm
         this.Name = "MainForm";
         this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
         this.Text = "SharePoint Online Manager";
+
+        // Set the application icon from the embedded resource
+        var exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+        if (!string.IsNullOrEmpty(exePath) && System.IO.File.Exists(exePath))
+        {
+            this.Icon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+        }
+
         this.ResumeLayout(false);
     }
 }

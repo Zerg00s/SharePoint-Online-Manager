@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using SharePointOnlineManager.Models;
+using SharePointOnlineManager.Screens;
 
 namespace SharePointOnlineManager.Services;
 
@@ -564,6 +565,61 @@ public class SharePointService : ISharePointService
         return 0;
     }
 
+    public async Task<List<SubsiteInfo>> GetSubsitesAsync(string siteUrl)
+    {
+        var subsites = new List<SubsiteInfo>();
+
+        try
+        {
+            var apiUrl = $"{siteUrl.TrimEnd('/')}/_api/web/webs?$select=Title,Url,ServerRelativeUrl,WebTemplate,Created,LastItemModifiedDate";
+            var response = await _client.GetAsync(apiUrl);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] GetSubsitesAsync - HTTP {(int)response.StatusCode} for {siteUrl}");
+                return subsites;
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            JsonElement valueElement;
+            if (root.TryGetProperty("value", out valueElement))
+            {
+                // Standard OData
+            }
+            else if (root.TryGetProperty("d", out var dElement) &&
+                     dElement.TryGetProperty("results", out valueElement))
+            {
+                // OData verbose
+            }
+            else
+            {
+                return subsites;
+            }
+
+            foreach (var item in valueElement.EnumerateArray())
+            {
+                subsites.Add(new SubsiteInfo
+                {
+                    Title = GetStringProperty(item, "Title"),
+                    Url = GetStringProperty(item, "Url"),
+                    ServerRelativeUrl = GetStringProperty(item, "ServerRelativeUrl"),
+                    WebTemplate = GetStringProperty(item, "WebTemplate"),
+                    Created = GetDateProperty(item, "Created"),
+                    LastItemModifiedDate = GetDateProperty(item, "LastItemModifiedDate")
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetSubsitesAsync - Exception: {ex.Message}");
+        }
+
+        return subsites;
+    }
+
     #region Permission Methods
 
     public async Task<SharePointResult<List<PermissionReportItem>>> GetWebPermissionsAsync(
@@ -571,6 +627,11 @@ public class SharePointService : ISharePointService
         string siteCollectionUrl,
         bool includeInherited = false)
     {
+        System.Diagnostics.Debug.WriteLine($"[SPOManager] GetWebPermissionsAsync - START");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   siteUrl: {siteUrl}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   siteCollectionUrl: {siteCollectionUrl}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   includeInherited: {includeInherited}");
+
         try
         {
             var permissions = new List<PermissionReportItem>();
@@ -578,10 +639,15 @@ public class SharePointService : ISharePointService
 
             // Check if web has unique permissions
             var hasUniqueUrl = $"{baseUrl}/_api/web?$select=Title,Url,HasUniqueRoleAssignments,ServerRelativeUrl";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Calling: {hasUniqueUrl}");
+
             var webResponse = await _client.GetAsync(hasUniqueUrl);
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Response: {(int)webResponse.StatusCode} {webResponse.StatusCode}");
 
             if (!webResponse.IsSuccessStatusCode)
             {
+                var errorContent = await webResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   ERROR Response Body: {errorContent.Substring(0, Math.Min(500, errorContent.Length))}");
                 return new SharePointResult<List<PermissionReportItem>>
                 {
                     Status = GetSharePointStatus(webResponse.StatusCode),
@@ -590,6 +656,8 @@ public class SharePointService : ISharePointService
             }
 
             var webJson = await webResponse.Content.ReadAsStringAsync();
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Web JSON (first 500 chars): {webJson.Substring(0, Math.Min(500, webJson.Length))}");
+
             using var webDoc = JsonDocument.Parse(webJson);
             var webRoot = webDoc.RootElement;
 
@@ -598,14 +666,22 @@ public class SharePointService : ISharePointService
             var serverRelativeUrl = GetStringProperty(webRoot, "ServerRelativeUrl");
             var hasUniquePerms = GetBoolProperty(webRoot, "HasUniqueRoleAssignments");
 
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   webTitle: {webTitle}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   webUrl: {webUrl}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   serverRelativeUrl: {serverRelativeUrl}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   hasUniquePerms: {hasUniquePerms}");
+
             // Determine object type
             var objectType = siteUrl.Equals(siteCollectionUrl, StringComparison.OrdinalIgnoreCase)
                 ? PermissionObjectType.SiteCollection
                 : (serverRelativeUrl.Count(c => c == '/') > 2 ? PermissionObjectType.Subsite : PermissionObjectType.Site);
 
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   objectType: {objectType}");
+
             // If inherited and we don't want inherited, skip
             if (!hasUniquePerms && !includeInherited)
             {
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Skipping - inherited permissions and includeInherited=false");
                 return new SharePointResult<List<PermissionReportItem>>
                 {
                     Data = permissions,
@@ -615,16 +691,29 @@ public class SharePointService : ISharePointService
 
             // Get role assignments
             var roleUrl = $"{baseUrl}/_api/web/roleassignments?$expand=Member,RoleDefinitionBindings";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Calling role assignments: {roleUrl}");
+
             var roleResponse = await _client.GetAsync(roleUrl);
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Role response: {(int)roleResponse.StatusCode} {roleResponse.StatusCode}");
 
             if (roleResponse.IsSuccessStatusCode)
             {
                 var roleJson = await roleResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Role JSON length: {roleJson.Length}");
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Role JSON (first 1000 chars): {roleJson.Substring(0, Math.Min(1000, roleJson.Length))}");
+
                 var roleItems = ParseRoleAssignments(roleJson, siteCollectionUrl, siteUrl, webTitle,
                     objectType, webTitle, webUrl, !hasUniquePerms, siteUrl);
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Parsed {roleItems.Count} permission entries");
                 permissions.AddRange(roleItems);
             }
+            else
+            {
+                var errorContent = await roleResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Role ERROR Response: {errorContent.Substring(0, Math.Min(500, errorContent.Length))}");
+            }
 
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetWebPermissionsAsync - END - returning {permissions.Count} permissions");
             return new SharePointResult<List<PermissionReportItem>>
             {
                 Data = permissions,
@@ -633,6 +722,8 @@ public class SharePointService : ISharePointService
         }
         catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetWebPermissionsAsync - EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   StackTrace: {ex.StackTrace}");
             return new SharePointResult<List<PermissionReportItem>>
             {
                 Status = SharePointResultStatus.Error,
@@ -648,6 +739,12 @@ public class SharePointService : ISharePointService
         bool isLibrary,
         bool includeInherited = false)
     {
+        System.Diagnostics.Debug.WriteLine($"[SPOManager] GetListPermissionsAsync - START");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   siteUrl: {siteUrl}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   listTitle: {listTitle}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   isLibrary: {isLibrary}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   includeInherited: {includeInherited}");
+
         try
         {
             var permissions = new List<PermissionReportItem>();
@@ -656,10 +753,15 @@ public class SharePointService : ISharePointService
 
             // Get list info including HasUniqueRoleAssignments
             var listUrl = $"{baseUrl}/_api/web/lists/GetByTitle('{encodedListTitle}')?$select=Title,HasUniqueRoleAssignments,RootFolder/ServerRelativeUrl&$expand=RootFolder";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Calling: {listUrl}");
+
             var listResponse = await _client.GetAsync(listUrl);
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Response: {(int)listResponse.StatusCode} {listResponse.StatusCode}");
 
             if (!listResponse.IsSuccessStatusCode)
             {
+                var errorContent = await listResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   ERROR Response: {errorContent.Substring(0, Math.Min(500, errorContent.Length))}");
                 return new SharePointResult<List<PermissionReportItem>>
                 {
                     Status = GetSharePointStatus(listResponse.StatusCode),
@@ -668,6 +770,8 @@ public class SharePointService : ISharePointService
             }
 
             var listJson = await listResponse.Content.ReadAsStringAsync();
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   List JSON (first 500 chars): {listJson.Substring(0, Math.Min(500, listJson.Length))}");
+
             using var listDoc = JsonDocument.Parse(listJson);
             var listRoot = listDoc.RootElement;
 
@@ -678,6 +782,9 @@ public class SharePointService : ISharePointService
                 listServerRelativeUrl = GetStringProperty(rootFolder, "ServerRelativeUrl");
             }
 
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   hasUniquePerms: {hasUniquePerms}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   listServerRelativeUrl: {listServerRelativeUrl}");
+
             var siteUri = new Uri(siteUrl);
             var listAbsoluteUrl = !string.IsNullOrEmpty(listServerRelativeUrl)
                 ? $"{siteUri.Scheme}://{siteUri.Host}{listServerRelativeUrl}"
@@ -686,6 +793,7 @@ public class SharePointService : ISharePointService
             // If inherited and we don't want inherited, skip
             if (!hasUniquePerms && !includeInherited)
             {
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Skipping list - inherited permissions and includeInherited=false");
                 return new SharePointResult<List<PermissionReportItem>>
                 {
                     Data = permissions,
@@ -701,16 +809,28 @@ public class SharePointService : ISharePointService
 
             // Get role assignments
             var roleUrl = $"{baseUrl}/_api/web/lists/GetByTitle('{encodedListTitle}')/roleassignments?$expand=Member,RoleDefinitionBindings";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Calling role assignments: {roleUrl}");
+
             var roleResponse = await _client.GetAsync(roleUrl);
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Role response: {(int)roleResponse.StatusCode} {roleResponse.StatusCode}");
 
             if (roleResponse.IsSuccessStatusCode)
             {
                 var roleJson = await roleResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Role JSON length: {roleJson.Length}");
+
                 var roleItems = ParseRoleAssignments(roleJson, siteCollectionUrl, siteUrl, siteTitle,
                     objectType, listTitle, listAbsoluteUrl, !hasUniquePerms, siteUrl);
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Parsed {roleItems.Count} permission entries for list");
                 permissions.AddRange(roleItems);
             }
+            else
+            {
+                var errorContent = await roleResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Role ERROR: {errorContent.Substring(0, Math.Min(500, errorContent.Length))}");
+            }
 
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetListPermissionsAsync - END - returning {permissions.Count} permissions");
             return new SharePointResult<List<PermissionReportItem>>
             {
                 Data = permissions,
@@ -719,6 +839,8 @@ public class SharePointService : ISharePointService
         }
         catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetListPermissionsAsync - EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   StackTrace: {ex.StackTrace}");
             return new SharePointResult<List<PermissionReportItem>>
             {
                 Status = SharePointResultStatus.Error,
@@ -736,6 +858,12 @@ public class SharePointService : ISharePointService
         bool includeItems = true,
         bool includeInherited = false)
     {
+        System.Diagnostics.Debug.WriteLine($"[SPOManager] GetItemPermissionsAsync - START");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   siteUrl: {siteUrl}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   listTitle: {listTitle}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   isLibrary: {isLibrary}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   includeFolders: {includeFolders}, includeItems: {includeItems}");
+
         try
         {
             var permissions = new List<PermissionReportItem>();
@@ -753,16 +881,25 @@ public class SharePointService : ISharePointService
             var selectFields = "Id,HasUniqueRoleAssignments,FileRef,FileLeafRef,Title,FileSystemObjectType";
             int lastId = 0;
             bool hasMore = true;
+            int pageNumber = 0;
+            int totalItemsScanned = 0;
+            int itemsWithUniquePerms = 0;
 
             while (hasMore)
             {
+                pageNumber++;
                 var apiUrl = $"{baseUrl}/_api/web/lists/GetByTitle('{encodedListTitle}')/items" +
                             $"?$select={selectFields}&$top=5000&$orderby=Id asc&$filter=Id gt {lastId}";
 
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Page {pageNumber}: {apiUrl}");
+
                 var response = await _client.GetAsync(apiUrl);
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Page {pageNumber} response: {(int)response.StatusCode} {response.StatusCode}");
 
                 if (!response.IsSuccessStatusCode)
                 {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager]   ERROR: {errorContent.Substring(0, Math.Min(500, errorContent.Length))}");
                     return new SharePointResult<List<PermissionReportItem>>
                     {
                         Status = GetSharePointStatus(response.StatusCode),
@@ -786,6 +923,7 @@ public class SharePointService : ISharePointService
                 }
                 else
                 {
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager]   Could not find 'value' or 'd.results' in response");
                     break;
                 }
 
@@ -793,6 +931,7 @@ public class SharePointService : ISharePointService
                 foreach (var item in valueElement.EnumerateArray())
                 {
                     itemCount++;
+                    totalItemsScanned++;
                     var itemId = GetIntProperty(item, "Id");
                     lastId = itemId;
 
@@ -801,6 +940,7 @@ public class SharePointService : ISharePointService
                     if (!hasUniquePerms)
                         continue;
 
+                    itemsWithUniquePerms++;
                     var fileRef = GetStringProperty(item, "FileRef");
                     var fileName = GetStringProperty(item, "FileLeafRef");
                     // FileSystemObjectType: 0 = file, 1 = folder
@@ -814,9 +954,19 @@ public class SharePointService : ISharePointService
 
                     var isFolder = fsObjType == 1;
 
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager]     Item {itemId}: hasUnique={hasUniquePerms}, isFolder={isFolder}, name={fileName}");
+
                     // Skip based on options
-                    if (isFolder && !includeFolders) continue;
-                    if (!isFolder && !includeItems) continue;
+                    if (isFolder && !includeFolders)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]       Skipping folder (includeFolders=false)");
+                        continue;
+                    }
+                    if (!isFolder && !includeItems)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]       Skipping item (includeItems=false)");
+                        continue;
+                    }
 
                     var absoluteUrl = !string.IsNullOrEmpty(fileRef)
                         ? $"{siteUri.Scheme}://{siteUri.Host}{fileRef}"
@@ -826,6 +976,8 @@ public class SharePointService : ISharePointService
 
                     // Get role assignments for this item
                     var roleUrl = $"{baseUrl}/_api/web/lists/GetByTitle('{encodedListTitle}')/items({itemId})/roleassignments?$expand=Member,RoleDefinitionBindings";
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager]       Fetching role assignments for item {itemId}");
+
                     var roleResponse = await _client.GetAsync(roleUrl);
 
                     if (roleResponse.IsSuccessStatusCode)
@@ -833,6 +985,8 @@ public class SharePointService : ISharePointService
                         var roleJson = await roleResponse.Content.ReadAsStringAsync();
                         var roleItems = ParseRoleAssignments(roleJson, siteCollectionUrl, siteUrl, siteTitle,
                             objectType, fileName, absoluteUrl, false, siteUrl);
+
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]       Found {roleItems.Count} role assignments for item {itemId}");
 
                         // Set the object path
                         foreach (var roleItem in roleItems)
@@ -842,11 +996,24 @@ public class SharePointService : ISharePointService
 
                         permissions.AddRange(roleItems);
                     }
+                    else
+                    {
+                        var errorContent = await roleResponse.Content.ReadAsStringAsync();
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]       Role assignment ERROR for item {itemId}: {(int)roleResponse.StatusCode}");
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]       Error: {errorContent.Substring(0, Math.Min(300, errorContent.Length))}");
+                    }
                 }
+
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Page {pageNumber}: {itemCount} items, lastId={lastId}");
 
                 // If we got fewer than 5000 items, we've reached the end
                 hasMore = itemCount == 5000;
             }
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetItemPermissionsAsync - END");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Total items scanned: {totalItemsScanned}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Items with unique permissions: {itemsWithUniquePerms}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Total permission entries: {permissions.Count}");
 
             return new SharePointResult<List<PermissionReportItem>>
             {
@@ -856,6 +1023,8 @@ public class SharePointService : ISharePointService
         }
         catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetItemPermissionsAsync - EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   StackTrace: {ex.StackTrace}");
             return new SharePointResult<List<PermissionReportItem>>
             {
                 Status = SharePointResultStatus.Error,
@@ -902,14 +1071,21 @@ public class SharePointService : ISharePointService
             }
             else
             {
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - Could not find 'value' or 'd.results'");
                 return items;
             }
 
+            int assignmentCount = 0;
             foreach (var assignment in valueElement.EnumerateArray())
             {
+                assignmentCount++;
+
                 // Get member info
                 if (!assignment.TryGetProperty("Member", out var member))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - Assignment {assignmentCount}: No 'Member' property");
                     continue;
+                }
 
                 var principalName = GetStringProperty(member, "Title");
                 var principalLogin = GetStringProperty(member, "LoginName");
@@ -926,19 +1102,27 @@ public class SharePointService : ISharePointService
 
                 // Get role definition bindings (permission levels)
                 if (!assignment.TryGetProperty("RoleDefinitionBindings", out var roleBindings))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - Assignment {assignmentCount}: No 'RoleDefinitionBindings' property");
                     continue;
-
-                JsonElement rolesArray;
-                if (roleBindings.TryGetProperty("results", out rolesArray))
-                {
-                    // OData verbose
                 }
-                else if (roleBindings.ValueKind == JsonValueKind.Array)
+
+                // IMPORTANT: Check if it's an array FIRST before trying TryGetProperty
+                // With odata=nometadata, RoleDefinitionBindings is a direct array
+                // With odata=verbose, it's wrapped in {"results": [...]}
+                JsonElement rolesArray;
+                if (roleBindings.ValueKind == JsonValueKind.Array)
                 {
+                    // odata=nometadata format - direct array
                     rolesArray = roleBindings;
+                }
+                else if (roleBindings.ValueKind == JsonValueKind.Object && roleBindings.TryGetProperty("results", out rolesArray))
+                {
+                    // OData verbose format - wrapped in results
                 }
                 else
                 {
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - Assignment {assignmentCount}: RoleDefinitionBindings is not array (ValueKind={roleBindings.ValueKind})");
                     continue;
                 }
 
@@ -953,7 +1137,12 @@ public class SharePointService : ISharePointService
                 }
 
                 if (permissionLevels.Count == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - Assignment {assignmentCount}: {principalName} - Only Limited Access, skipping");
                     continue;
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - Assignment {assignmentCount}: {principalName} ({principalTypeStr}) = {string.Join(", ", permissionLevels)}");
 
                 items.Add(new PermissionReportItem
                 {
@@ -971,10 +1160,257 @@ public class SharePointService : ISharePointService
                     InheritedFrom = isInherited ? inheritedFrom : string.Empty
                 });
             }
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - Processed {assignmentCount} assignments, created {items.Count} entries");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] ParseRoleAssignments - EXCEPTION: {ex.Message}");
+        }
 
         return items;
+    }
+
+    #endregion
+
+    #region Site Deletion
+
+    public async Task<SharePointResult<bool>> DeleteSiteCollectionAsync(string siteUrl)
+    {
+        try
+        {
+            // Extract tenant name from URL to construct admin URL
+            var siteUri = new Uri(siteUrl);
+            var hostParts = siteUri.Host.Split('.');
+            if (hostParts.Length < 3)
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = SharePointResultStatus.Error,
+                    ErrorMessage = "Invalid SharePoint URL format"
+                };
+            }
+
+            var tenantName = hostParts[0];
+            var adminUrl = $"https://{tenantName}-admin.sharepoint.com";
+
+            // Get request digest for POST operation
+            var digestUrl = $"{adminUrl}/_api/contextinfo";
+            var digestResponse = await _client.PostAsync(digestUrl, new StringContent(""));
+
+            if (!digestResponse.IsSuccessStatusCode)
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = GetSharePointStatus(digestResponse.StatusCode),
+                    ErrorMessage = $"Failed to get request digest: {GetErrorMessage(digestResponse.StatusCode)}"
+                };
+            }
+
+            var digestJson = await digestResponse.Content.ReadAsStringAsync();
+            using var digestDoc = JsonDocument.Parse(digestJson);
+            var formDigestValue = GetStringProperty(digestDoc.RootElement, "FormDigestValue");
+
+            if (string.IsNullOrEmpty(formDigestValue))
+            {
+                // Try alternative path for the digest value
+                if (digestDoc.RootElement.TryGetProperty("d", out var dElement) &&
+                    dElement.TryGetProperty("GetContextWebInformation", out var webInfo))
+                {
+                    formDigestValue = GetStringProperty(webInfo, "FormDigestValue");
+                }
+            }
+
+            // Use Tenant RemoveSite endpoint
+            var apiUrl = $"{adminUrl}/_api/Microsoft.Online.SharePoint.TenantAdministration.Tenant/RemoveSite";
+
+            var requestBody = JsonSerializer.Serialize(new { siteUrl = siteUrl });
+            var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
+            {
+                Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
+            };
+
+            if (!string.IsNullOrEmpty(formDigestValue))
+            {
+                request.Headers.Add("X-RequestDigest", formDigestValue);
+            }
+
+            var response = await _client.SendAsync(request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                return new SharePointResult<bool>
+                {
+                    Data = true,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = GetSharePointStatus(response.StatusCode),
+                ErrorMessage = $"Failed to delete site: {GetErrorMessage(response.StatusCode)}"
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    /// <summary>
+    /// Sets the lock state of a site collection.
+    /// </summary>
+    /// <param name="siteUrl">The URL of the site collection.</param>
+    /// <param name="lockState">The lock state: "Unlock", "ReadOnly", or "NoAccess".</param>
+    public async Task<SharePointResult<bool>> SetSiteLockStateAsync(string siteUrl, string lockState)
+    {
+        try
+        {
+            // Extract tenant name from URL to construct admin URL
+            var siteUri = new Uri(siteUrl);
+            var hostParts = siteUri.Host.Split('.');
+            if (hostParts.Length < 3)
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = SharePointResultStatus.Error,
+                    ErrorMessage = "Invalid SharePoint URL format"
+                };
+            }
+
+            var tenantName = hostParts[0];
+            var adminUrl = $"https://{tenantName}-admin.sharepoint.com";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - SiteUrl: {siteUrl}, LockState: {lockState}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Admin URL: {adminUrl}, Cookie Domain: {_domain}");
+
+            // Get request digest for POST operation
+            var digestUrl = $"{adminUrl}/_api/contextinfo";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Getting digest from: {digestUrl}");
+            var digestResponse = await _client.PostAsync(digestUrl, new StringContent(""));
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Digest response: {digestResponse.StatusCode}");
+
+            if (!digestResponse.IsSuccessStatusCode)
+            {
+                var digestError = await digestResponse.Content.ReadAsStringAsync();
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Digest error: {digestError}");
+                return new SharePointResult<bool>
+                {
+                    Status = GetSharePointStatus(digestResponse.StatusCode),
+                    ErrorMessage = $"Failed to get request digest: {digestResponse.StatusCode} - {digestError}"
+                };
+            }
+
+            var digestJson = await digestResponse.Content.ReadAsStringAsync();
+            using var digestDoc = JsonDocument.Parse(digestJson);
+            var formDigestValue = GetStringProperty(digestDoc.RootElement, "FormDigestValue");
+
+            if (string.IsNullOrEmpty(formDigestValue))
+            {
+                // Try alternative path for the digest value
+                if (digestDoc.RootElement.TryGetProperty("d", out var dElement) &&
+                    dElement.TryGetProperty("GetContextWebInformation", out var webInfo))
+                {
+                    formDigestValue = GetStringProperty(webInfo, "FormDigestValue");
+                }
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Got digest: {!string.IsNullOrEmpty(formDigestValue)}");
+
+            // Use CSOM ProcessQuery endpoint - this is how SharePoint Admin operations work
+            var apiUrl = $"{adminUrl}/_vti_bin/client.svc/ProcessQuery";
+
+            // CSOM XML request to set site lock state
+            // LockState valid values are: "Unlock", "ReadOnly", "NoAccess"
+            var csomRequest = $@"<Request xmlns=""http://schemas.microsoft.com/sharepoint/clientquery/2009"" SchemaVersion=""15.0.0.0"" LibraryVersion=""16.0.0.0"" ApplicationName=""SharePoint Online Manager"">
+  <Actions>
+    <ObjectPath Id=""1"" ObjectPathId=""0"" />
+    <ObjectPath Id=""3"" ObjectPathId=""2"" />
+    <SetProperty Id=""4"" ObjectPathId=""2"" Name=""LockState"">
+      <Parameter Type=""String"">{lockState}</Parameter>
+    </SetProperty>
+    <Method Name=""Update"" Id=""5"" ObjectPathId=""2"" />
+  </Actions>
+  <ObjectPaths>
+    <Constructor Id=""0"" TypeId=""{{268004ae-ef6b-4e9b-8425-127220d84719}}"" />
+    <Method Id=""2"" ParentId=""0"" Name=""GetSitePropertiesByUrl"">
+      <Parameters>
+        <Parameter Type=""String"">{System.Security.SecurityElement.Escape(siteUrl)}</Parameter>
+        <Parameter Type=""Boolean"">false</Parameter>
+      </Parameters>
+    </Method>
+  </ObjectPaths>
+</Request>";
+
+            var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
+            {
+                Content = new StringContent(csomRequest, System.Text.Encoding.UTF8, "text/xml")
+            };
+
+            if (!string.IsNullOrEmpty(formDigestValue))
+            {
+                request.Headers.Add("X-RequestDigest", formDigestValue);
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - URL: {apiUrl}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - CSOM Request sent");
+
+            var response = await _client.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Response: {response.StatusCode}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Response content: {responseContent}");
+
+            if (response.IsSuccessStatusCode)
+            {
+                // Check if the CSOM response contains an error
+                if (responseContent.Contains("ErrorInfo") && responseContent.Contains("ErrorMessage"))
+                {
+                    // Extract error message from CSOM response
+                    var errorStart = responseContent.IndexOf("ErrorMessage");
+                    var errorEnd = responseContent.IndexOf(",", errorStart);
+                    var errorMsg = errorStart > 0 && errorEnd > errorStart
+                        ? responseContent.Substring(errorStart, errorEnd - errorStart)
+                        : "CSOM operation failed";
+
+                    return new SharePointResult<bool>
+                    {
+                        Data = false,
+                        Status = SharePointResultStatus.Error,
+                        ErrorMessage = errorMsg
+                    };
+                }
+
+                return new SharePointResult<bool>
+                {
+                    Data = true,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = GetSharePointStatus(response.StatusCode),
+                ErrorMessage = $"{response.StatusCode}: {responseContent}"
+            };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetSiteLockState - Exception: {ex.Message}");
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
     }
 
     #endregion

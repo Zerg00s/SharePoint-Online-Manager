@@ -101,6 +101,29 @@ public partial class LoginForm : Form
                 {
                     _loginComplete = true;
 
+                    // Get cookie expiration - FedAuth typically has the shorter expiration
+                    var fedAuthCookie = cookies.FirstOrDefault(c => c.Name == "FedAuth");
+                    DateTime? expiresAt = null;
+                    if (fedAuthCookie != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager] FedAuth cookie Expires raw value: {fedAuthCookie.Expires}");
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager] FedAuth cookie Expires Kind: {fedAuthCookie.Expires.Kind}");
+
+                        // WebView2 cookie Expires is already a DateTime (in local time)
+                        // A session cookie typically has Expires = DateTime.MinValue or year 1601
+                        if (fedAuthCookie.Expires.Year > 1970)
+                        {
+                            expiresAt = fedAuthCookie.Expires.Kind == DateTimeKind.Utc
+                                ? fedAuthCookie.Expires
+                                : fedAuthCookie.Expires.ToUniversalTime();
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager] FedAuth expires at (UTC): {expiresAt:u}");
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager] FedAuth has no expiration (session cookie or year <= 1970)");
+                        }
+                    }
+
                     // Try to get current user's email via REST API
                     System.Diagnostics.Debug.WriteLine($"[SPOManager] Fetching current user email...");
                     var userEmail = await GetCurrentUserEmailAsync();
@@ -112,7 +135,8 @@ public partial class LoginForm : Form
                         FedAuth = fedAuth,
                         RtFa = rtFa,
                         UserEmail = userEmail,
-                        CapturedAt = DateTime.UtcNow
+                        CapturedAt = DateTime.UtcNow,
+                        ExpiresAt = expiresAt
                     };
 
                     System.Diagnostics.Debug.WriteLine($"[SPOManager] Cookies captured successfully. Closing form.");

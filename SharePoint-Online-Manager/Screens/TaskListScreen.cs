@@ -13,8 +13,10 @@ public class TaskListScreen : BaseScreen
     private Button _runButton = null!;
     private Button _viewButton = null!;
     private Button _deleteButton = null!;
+    private Button _refreshButton = null!;
     private ITaskService _taskService = null!;
     private IConnectionManager _connectionManager = null!;
+    private System.Windows.Forms.Timer? _autoRefreshTimer;
 
     public override string ScreenTitle => "Tasks";
 
@@ -40,31 +42,55 @@ public class TaskListScreen : BaseScreen
 
         _runButton = new Button
         {
-            Text = "Run",
-            Size = new Size(80, 32),
+            Text = "\u25B6 Run",
+            Size = new Size(90, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 120, 212),
+            ForeColor = Color.White
         };
+        _runButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _runButton.FlatAppearance.BorderSize = 1;
         _runButton.Click += RunButton_Click;
 
         _viewButton = new Button
         {
-            Text = "View Details",
-            Size = new Size(100, 32),
+            Text = "\U0001F4CB View Details",
+            Size = new Size(120, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _viewButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _viewButton.FlatAppearance.BorderSize = 1;
         _viewButton.Click += ViewButton_Click;
 
         _deleteButton = new Button
         {
-            Text = "Delete",
-            Size = new Size(80, 32),
-            Enabled = false
+            Text = "\U0001F5D1 Delete",
+            Size = new Size(90, 28),
+            Margin = new Padding(0, 0, 20, 0),
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.DarkRed
         };
+        _deleteButton.FlatAppearance.BorderColor = Color.DarkRed;
+        _deleteButton.FlatAppearance.BorderSize = 1;
         _deleteButton.Click += DeleteButton_Click;
 
-        headerPanel.Controls.AddRange(new Control[] { _runButton, _viewButton, _deleteButton });
+        _refreshButton = new Button
+        {
+            Text = "\U0001F504 Refresh",
+            Size = new Size(100, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat
+        };
+        _refreshButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _refreshButton.FlatAppearance.BorderSize = 1;
+        _refreshButton.Click += RefreshButton_Click;
+
+        headerPanel.Controls.AddRange(new Control[] { _runButton, _viewButton, _deleteButton, _refreshButton });
 
         // Tasks ListView
         _tasksListView = new ListView
@@ -92,6 +118,37 @@ public class TaskListScreen : BaseScreen
     }
 
     public override async Task OnNavigatedToAsync(object? parameter = null)
+    {
+        await RefreshTasksAsync();
+
+        // Set up auto-refresh timer for running tasks
+        if (_autoRefreshTimer == null)
+        {
+            _autoRefreshTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 5000 // 5 seconds
+            };
+            _autoRefreshTimer.Tick += async (s, e) => await AutoRefreshIfRunningAsync();
+        }
+        _autoRefreshTimer.Start();
+    }
+
+    public override void OnNavigatedFrom()
+    {
+        _autoRefreshTimer?.Stop();
+    }
+
+    private async Task AutoRefreshIfRunningAsync()
+    {
+        // Check if any tasks are running
+        var tasks = await _taskService.GetAllTasksAsync();
+        if (tasks.Any(t => t.Status == Models.TaskStatus.Running))
+        {
+            await RefreshTasksAsync();
+        }
+    }
+
+    private async void RefreshButton_Click(object? sender, EventArgs e)
     {
         await RefreshTasksAsync();
     }

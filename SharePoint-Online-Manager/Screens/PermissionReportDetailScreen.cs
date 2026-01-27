@@ -77,35 +77,51 @@ public class PermissionReportDetailScreen : BaseScreen
 
         _runButton = new Button
         {
-            Text = "Run Task",
-            Size = new Size(100, 28),
-            Margin = new Padding(0, 0, 10, 0)
+            Text = "\u25B6 Run Task",
+            Size = new Size(110, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 120, 212),
+            ForeColor = Color.White
         };
+        _runButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _runButton.FlatAppearance.BorderSize = 1;
         _runButton.Click += RunButton_Click;
 
         _exportButton = new Button
         {
-            Text = "Export All",
-            Size = new Size(90, 28),
+            Text = "\U0001F4BE Export All",
+            Size = new Size(110, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _exportButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _exportButton.FlatAppearance.BorderSize = 1;
         _exportButton.Click += ExportButton_Click;
 
         _exportSummaryButton = new Button
         {
-            Text = "Export Summary",
-            Size = new Size(110, 28),
+            Text = "\U0001F4CB Export Summary",
+            Size = new Size(140, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _exportSummaryButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _exportSummaryButton.FlatAppearance.BorderSize = 1;
         _exportSummaryButton.Click += ExportSummaryButton_Click;
 
         _deleteButton = new Button
         {
-            Text = "Delete Task",
-            Size = new Size(100, 28)
+            Text = "\U0001F5D1 Delete Task",
+            Size = new Size(110, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.DarkRed
         };
+        _deleteButton.FlatAppearance.BorderColor = Color.DarkRed;
+        _deleteButton.FlatAppearance.BorderSize = 1;
         _deleteButton.Click += DeleteButton_Click;
 
         buttonPanel.Controls.AddRange(new Control[] { _runButton, _exportButton, _exportSummaryButton, _deleteButton });
@@ -328,6 +344,13 @@ public class PermissionReportDetailScreen : BaseScreen
         else if (parameter is TaskDefinition taskDef)
         {
             task = taskDef;
+        }
+
+        // If no parameter but we already have a task (back navigation), use existing task
+        if (task == null && _task != null)
+        {
+            await RefreshTaskDetailsAsync();
+            return;
         }
 
         if (task == null)

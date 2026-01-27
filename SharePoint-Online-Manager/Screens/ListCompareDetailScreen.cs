@@ -77,44 +77,63 @@ public class ListCompareDetailScreen : BaseScreen
 
         _runButton = new Button
         {
-            Text = "Run Task",
-            Size = new Size(100, 28),
-            Margin = new Padding(0, 0, 10, 0)
+            Text = "\u25B6 Run Task",
+            Size = new Size(110, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 120, 212),
+            ForeColor = Color.White
         };
+        _runButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _runButton.FlatAppearance.BorderSize = 1;
         _runButton.Click += RunButton_Click;
 
         _exportAllButton = new Button
         {
-            Text = "Export All",
-            Size = new Size(90, 28),
+            Text = "\U0001F4BE Export All",
+            Size = new Size(110, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _exportAllButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _exportAllButton.FlatAppearance.BorderSize = 1;
         _exportAllButton.Click += ExportAllButton_Click;
 
         _exportIssuesButton = new Button
         {
-            Text = "Export Issues",
-            Size = new Size(100, 28),
+            Text = "\u26A0 Export Issues",
+            Size = new Size(120, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _exportIssuesButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _exportIssuesButton.FlatAppearance.BorderSize = 1;
         _exportIssuesButton.Click += ExportIssuesButton_Click;
 
         _exportMappingButton = new Button
         {
-            Text = "Export Mapping",
-            Size = new Size(110, 28),
+            Text = "\U0001F4CB Export Mapping",
+            Size = new Size(140, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _exportMappingButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _exportMappingButton.FlatAppearance.BorderSize = 1;
         _exportMappingButton.Click += ExportMappingButton_Click;
 
         _deleteButton = new Button
         {
-            Text = "Delete Task",
-            Size = new Size(100, 28)
+            Text = "\U0001F5D1 Delete Task",
+            Size = new Size(110, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.DarkRed
         };
+        _deleteButton.FlatAppearance.BorderColor = Color.DarkRed;
+        _deleteButton.FlatAppearance.BorderSize = 1;
         _deleteButton.Click += DeleteButton_Click;
 
         buttonPanel.Controls.AddRange(new Control[] { _runButton, _exportAllButton, _exportIssuesButton, _exportMappingButton, _deleteButton });
@@ -304,6 +323,13 @@ public class ListCompareDetailScreen : BaseScreen
         else if (parameter is TaskDefinition taskDef)
         {
             task = taskDef;
+        }
+
+        // If no parameter but we already have a task (back navigation), use existing task
+        if (task == null && _task != null)
+        {
+            await RefreshTaskDetailsAsync();
+            return;
         }
 
         if (task == null)

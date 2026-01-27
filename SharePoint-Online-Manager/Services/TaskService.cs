@@ -944,6 +944,11 @@ public class TaskService : ITaskService
         IProgress<TaskProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        System.Diagnostics.Debug.WriteLine($"[SPOManager] ExecutePermissionReportAsync - START");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   TaskId: {task.Id}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   TaskName: {task.Name}");
+        System.Diagnostics.Debug.WriteLine($"[SPOManager]   TargetSites: {task.TargetSiteUrls.Count}");
+
         var result = new PermissionReportResult
         {
             TaskId = task.Id,
@@ -1008,11 +1013,15 @@ public class TaskService : ITaskService
             {
                 var domain = domainGroup.Key;
                 result.Log($"Processing domain: {domain}");
+                System.Diagnostics.Debug.WriteLine($"[SPOManager] Processing domain: {domain} ({domainGroup.Count()} sites)");
 
                 var cookies = authService.GetStoredCookies(domain);
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Cookies: {(cookies == null ? "NULL" : $"Domain={cookies.Domain}, Valid={cookies.IsValid}")}");
+
                 if (cookies == null || !cookies.IsValid)
                 {
                     result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager]   SKIPPING - no valid credentials");
 
                     foreach (var siteUrl in domainGroup)
                     {
@@ -1029,6 +1038,7 @@ public class TaskService : ITaskService
                 }
 
                 // Pass the actual target domain so cookies are set correctly
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Creating SharePointService for domain: {domain}");
                 using var spService = new SharePointService(cookies, domain);
 
                 foreach (var siteUrl in domainGroup)
@@ -1045,24 +1055,37 @@ public class TaskService : ITaskService
                     });
 
                     result.Log($"Processing site: {siteUrl}");
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager] ========== Processing site: {siteUrl} ==========");
 
                     var siteResult = new SitePermissionResult { SiteUrl = siteUrl };
 
                     try
                     {
                         // Get site info for title
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]   Getting site info...");
                         var siteInfo = await spService.GetSiteInfoAsync(siteUrl);
                         siteResult.SiteTitle = siteInfo.Title;
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]   Site title: {siteInfo.Title}, Connected: {siteInfo.IsConnected}");
+
+                        if (!siteInfo.IsConnected)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Site not connected! Error: {siteInfo.ErrorMessage}");
+                        }
 
                         // Determine site collection URL (for context)
                         var siteCollectionUrl = GetSiteCollectionUrl(siteUrl);
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]   Site collection URL: {siteCollectionUrl}");
 
                         // Get site/web permissions
                         if (config.IncludeSitePermissions)
                         {
                             result.Log($"  Getting site permissions...");
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Getting web permissions (includeInherited={config.IncludeInheritedPermissions})...");
+
                             var webPermsResult = await spService.GetWebPermissionsAsync(
                                 siteUrl, siteCollectionUrl, config.IncludeInheritedPermissions);
+
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Web permissions result: Status={webPermsResult.Status}, Count={webPermsResult.Data?.Count ?? 0}");
 
                             if (webPermsResult.IsSuccess && webPermsResult.Data != null)
                             {
@@ -1072,30 +1095,43 @@ public class TaskService : ITaskService
                             else
                             {
                                 result.Log($"    Error getting site permissions: {webPermsResult.ErrorMessage}");
+                                System.Diagnostics.Debug.WriteLine($"[SPOManager]   ERROR: {webPermsResult.ErrorMessage}");
                             }
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Skipping web permissions (config.IncludeSitePermissions=false)");
                         }
 
                         // Get lists and libraries
                         if (config.IncludeListPermissions || config.IncludeFolderPermissions || config.IncludeItemPermissions)
                         {
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Getting lists (includeHidden={config.IncludeHiddenLists})...");
                             var listsResult = await spService.GetListsAsync(siteUrl, config.IncludeHiddenLists);
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Lists result: Status={listsResult.Status}, Count={listsResult.Data?.Count ?? 0}");
 
                             if (listsResult.IsSuccess && listsResult.Data != null)
                             {
                                 result.Log($"  Processing {listsResult.Data.Count} lists/libraries...");
 
+                                int listIndex = 0;
                                 foreach (var list in listsResult.Data)
                                 {
+                                    listIndex++;
                                     cancellationToken.ThrowIfCancellationRequested();
 
                                     var isLibrary = list.BaseTemplate == 101;
+                                    System.Diagnostics.Debug.WriteLine($"[SPOManager]   --- List {listIndex}/{listsResult.Data.Count}: '{list.Title}' (Template={list.BaseTemplate}, IsLibrary={isLibrary}) ---");
 
                                     // Get list permissions
                                     if (config.IncludeListPermissions)
                                     {
+                                        System.Diagnostics.Debug.WriteLine($"[SPOManager]     Getting list permissions...");
                                         var listPermsResult = await spService.GetListPermissionsAsync(
                                             siteUrl, siteCollectionUrl, list.Title, isLibrary,
                                             config.IncludeInheritedPermissions);
+
+                                        System.Diagnostics.Debug.WriteLine($"[SPOManager]     List permissions result: Status={listPermsResult.Status}, Count={listPermsResult.Data?.Count ?? 0}");
 
                                         if (listPermsResult.IsSuccess && listPermsResult.Data != null && listPermsResult.Data.Count > 0)
                                         {
@@ -1107,10 +1143,13 @@ public class TaskService : ITaskService
                                     // Get item/folder permissions (only if unique permissions exist)
                                     if (config.IncludeFolderPermissions || config.IncludeItemPermissions)
                                     {
+                                        System.Diagnostics.Debug.WriteLine($"[SPOManager]     Getting item permissions (folders={config.IncludeFolderPermissions}, items={config.IncludeItemPermissions})...");
                                         var itemPermsResult = await spService.GetItemPermissionsAsync(
                                             siteUrl, siteCollectionUrl, list.Title, isLibrary,
                                             config.IncludeFolderPermissions, config.IncludeItemPermissions,
                                             config.IncludeInheritedPermissions);
+
+                                        System.Diagnostics.Debug.WriteLine($"[SPOManager]     Item permissions result: Status={itemPermsResult.Status}, Count={itemPermsResult.Data?.Count ?? 0}");
 
                                         if (itemPermsResult.IsSuccess && itemPermsResult.Data != null && itemPermsResult.Data.Count > 0)
                                         {
@@ -1120,11 +1159,20 @@ public class TaskService : ITaskService
                                     }
                                 }
                             }
+                            else
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[SPOManager]   ERROR getting lists: {listsResult.ErrorMessage}");
+                            }
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Skipping lists (config.IncludeListPermissions=false and folders/items disabled)");
                         }
 
                         siteResult.Success = true;
                         result.SuccessfulSites++;
                         result.Log($"  Site completed: {siteResult.TotalPermissions} permission entries");
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]   SITE COMPLETE: {siteResult.TotalPermissions} permission entries");
                     }
                     catch (Exception ex)
                     {
@@ -1132,6 +1180,8 @@ public class TaskService : ITaskService
                         siteResult.ErrorMessage = ex.Message;
                         result.FailedSites++;
                         result.Log($"  Exception: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]   SITE EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[SPOManager]   StackTrace: {ex.StackTrace}");
                     }
 
                     result.SiteResults.Add(siteResult);
@@ -1145,6 +1195,15 @@ public class TaskService : ITaskService
             var (totalPerms, uniqueObjects, uniquePrincipals) = result.GetSummary();
             result.Log($"Task completed. Sites: {result.SuccessfulSites} successful, {result.FailedSites} failed");
             result.Log($"Total: {totalPerms} permissions, {uniqueObjects} unique objects, {uniquePrincipals} principals");
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] ========================================");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] TASK COMPLETED");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Successful sites: {result.SuccessfulSites}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Failed sites: {result.FailedSites}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Total permissions: {totalPerms}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Unique objects: {uniqueObjects}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   Unique principals: {uniquePrincipals}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] ========================================");
 
             task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
             task.CompletedAt = DateTime.UtcNow;

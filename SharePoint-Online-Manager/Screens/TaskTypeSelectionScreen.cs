@@ -171,6 +171,7 @@ public class TaskTypeSelectionScreen : BaseScreen
         TaskType.ListCompare => "\U0001F504", // arrows clockwise emoji (compare)
         TaskType.DocumentReport => "\U0001F4C1", // file folder emoji (documents)
         TaskType.PermissionReport => "\U0001F512", // lock emoji (permissions)
+        TaskType.SetSiteState => "\u2699", // gear emoji (settings)
         _ => "\U0001F4C4" // page emoji
     };
 
@@ -190,6 +191,13 @@ public class TaskTypeSelectionScreen : BaseScreen
                 Status = Models.TaskStatus.Pending
             };
 
+            // Save state configuration for SetSiteState task
+            if (taskType == TaskType.SetSiteState && dialog.SelectedState != null)
+            {
+                var config = new { TargetState = dialog.SelectedState };
+                task.ConfigurationJson = System.Text.Json.JsonSerializer.Serialize(config);
+            }
+
             await taskService.SaveTaskAsync(task);
 
             SetStatus($"Task '{task.Name}' created with {_context.SelectedSites.Count} sites");
@@ -202,6 +210,10 @@ public class TaskTypeSelectionScreen : BaseScreen
             else if (taskType == TaskType.PermissionReport)
             {
                 await NavigationService!.NavigateToAsync<PermissionReportDetailScreen>(task);
+            }
+            else if (taskType == TaskType.SetSiteState)
+            {
+                await NavigationService!.NavigateToAsync<SetSiteStateDetailScreen>(task);
             }
             else
             {
@@ -217,8 +229,10 @@ public class TaskTypeSelectionScreen : BaseScreen
 public class CreateTaskDialog : Form
 {
     private TextBox _nameTextBox = null!;
+    private ComboBox? _stateComboBox;
 
     public string TaskName { get; private set; } = string.Empty;
+    public string? SelectedState { get; private set; }
 
     public CreateTaskDialog(int siteCount, TaskType taskType)
     {
@@ -228,7 +242,6 @@ public class CreateTaskDialog : Form
     private void InitializeUI(int siteCount, TaskType taskType)
     {
         Text = "Create Task";
-        Size = new Size(400, 180);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -255,20 +268,56 @@ public class CreateTaskDialog : Form
             Text = $"{taskType.GetDisplayName()} - {DateTime.Now:yyyy-MM-dd HH:mm}"
         };
 
+        int buttonY = 105;
+
+        // Add state dropdown for SetSiteState task type
+        if (taskType == TaskType.SetSiteState)
+        {
+            var stateLabel = new Label
+            {
+                Text = "Target State:",
+                Location = new Point(15, 105),
+                AutoSize = true
+            };
+
+            _stateComboBox = new ComboBox
+            {
+                Location = new Point(15, 125),
+                Size = new Size(350, 23),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            _stateComboBox.Items.AddRange(["Unlock (Active)", "Read Only", "No Access (Restricted)"]);
+            _stateComboBox.SelectedIndex = 0;
+
+            Controls.Add(stateLabel);
+            Controls.Add(_stateComboBox);
+
+            buttonY = 160;
+            Size = new Size(400, 235);
+        }
+        else
+        {
+            Size = new Size(400, 180);
+        }
+
         var okButton = new Button
         {
             Text = "Create",
             DialogResult = DialogResult.OK,
-            Location = new Point(205, 105),
+            Location = new Point(205, buttonY),
             Size = new Size(75, 28)
         };
-        okButton.Click += (s, e) => TaskName = _nameTextBox.Text.Trim();
+        okButton.Click += (s, e) =>
+        {
+            TaskName = _nameTextBox.Text.Trim();
+            SelectedState = _stateComboBox?.SelectedItem?.ToString();
+        };
 
         var cancelButton = new Button
         {
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(290, 105),
+            Location = new Point(290, buttonY),
             Size = new Size(75, 28)
         };
 

@@ -23,7 +23,12 @@ public enum TaskType
     /// <summary>
     /// Report on permissions across selected site collections.
     /// </summary>
-    PermissionReport
+    PermissionReport,
+
+    /// <summary>
+    /// Set site state (Unlock, ReadOnly, NoAccess) for selected site collections.
+    /// </summary>
+    SetSiteState
 }
 
 /// <summary>
@@ -65,6 +70,7 @@ public class TaskDefinition
         TaskType.ListCompare => "List Compare",
         TaskType.DocumentReport => "Document Report",
         TaskType.PermissionReport => "Permission Report",
+        TaskType.SetSiteState => "Set Site State",
         _ => Type.ToString()
     };
 
@@ -96,6 +102,7 @@ public static class TaskTypeExtensions
         TaskType.ListCompare => "Compare list item counts between source and target sites",
         TaskType.DocumentReport => "Report on all documents/files across selected sites",
         TaskType.PermissionReport => "Report on permissions across selected sites",
+        TaskType.SetSiteState => "Set site state: Unlock, ReadOnly, or NoAccess",
         _ => type.ToString()
     };
 
@@ -108,6 +115,7 @@ public static class TaskTypeExtensions
         TaskType.ListCompare => "List Compare",
         TaskType.DocumentReport => "Document Report",
         TaskType.PermissionReport => "Permission Report",
+        TaskType.SetSiteState => "Set Site State",
         _ => type.ToString()
     };
 

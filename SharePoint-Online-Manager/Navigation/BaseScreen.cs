@@ -92,6 +92,14 @@ public abstract class BaseScreen : UserControl
     }
 
     /// <summary>
+    /// Updates the title bar with this screen's title.
+    /// </summary>
+    protected void UpdateTitle()
+    {
+        NavigationService?.UpdateTitle();
+    }
+
+    /// <summary>
     /// Helper method to resolve a service from the service provider.
     /// </summary>
     protected T? GetService<T>() where T : class

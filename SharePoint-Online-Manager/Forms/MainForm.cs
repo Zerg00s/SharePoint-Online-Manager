@@ -58,20 +58,31 @@ public partial class MainForm : Form
 
         _backButton = new ToolStripButton
         {
-            Text = "Back",
-            DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
+            Text = "\u2190 Back", // Left arrow
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
             Enabled = false,
-            ToolTipText = "Go back to previous screen"
+            ToolTipText = "Go back to previous screen",
+            Font = new Font("Segoe UI", 9F)
         };
         _backButton.Click += async (s, e) => await _navigationService.GoBackAsync();
 
         _homeButton = new ToolStripButton
         {
-            Text = "Home",
-            DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
-            ToolTipText = "Go to Connections"
+            Text = "\U0001F3E0 Home", // House emoji
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText = "Go to Connections",
+            Font = new Font("Segoe UI", 9F)
         };
         _homeButton.Click += async (s, e) => await _navigationService.NavigateToHomeAsync();
+
+        var tasksButton = new ToolStripButton
+        {
+            Text = "\U0001F4CB Tasks", // Clipboard emoji
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText = "View all tasks",
+            Font = new Font("Segoe UI", 9F)
+        };
+        tasksButton.Click += async (s, e) => await NavigateToTaskListAsync();
 
         var separator = new ToolStripSeparator();
 
@@ -81,7 +92,7 @@ public partial class MainForm : Form
             Font = new Font(Font.FontFamily, 10F, FontStyle.Bold)
         };
 
-        _toolStrip.Items.AddRange(new ToolStripItem[] { _backButton, _homeButton, separator, _titleLabel });
+        _toolStrip.Items.AddRange(new ToolStripItem[] { _backButton, _homeButton, tasksButton, separator, _titleLabel });
         _toolStrip.Location = new Point(0, 24);
         _toolStrip.Name = "toolStrip";
 
@@ -205,8 +216,12 @@ public partial class MainForm : Form
     private static void ShowAbout()
     {
         MessageBox.Show(
-            "SharePoint Online Manager\n\nVersion 1.0\n\nA tool for managing SharePoint Online sites and running reports.",
-            "About",
+            "SharePoint Online Manager\n\n" +
+            "Version 1.0\n\n" +
+            "A tool for managing SharePoint Online sites and running reports.\n\n" +
+            "Developed by Denis Molodtsov\n" +
+            "\u00A9 2026 All Rights Reserved",
+            "About SharePoint Online Manager",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
     }

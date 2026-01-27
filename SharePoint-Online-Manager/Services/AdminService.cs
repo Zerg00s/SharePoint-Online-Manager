@@ -147,8 +147,34 @@ public class AdminService : IAdminService
                 Title = GetJsonString(item, "Title"),
                 Url = GetJsonString(item, "SiteUrl"),
                 Template = GetJsonString(item, "TemplateName"),
-                Owner = GetJsonString(item, "SiteOwnerEmail")
+                Owner = GetJsonString(item, "SiteOwnerEmail"),
+                ExternalSharing = GetJsonString(item, "ExternalSharing"),
+                FileCount = GetJsonInt(item, "NumOfFiles"),
+                HubSiteId = GetJsonGuid(item, "HubSiteId"),
+                GroupId = GetJsonGuid(item, "GroupId"),
+                SiteId = GetJsonGuid(item, "SiteId"),
+                PageViews = GetJsonInt(item, "PageViews"),
+                PagesVisited = GetJsonInt(item, "PagesVisited"),
+                State = GetJsonInt(item, "State"),
+                ChannelType = GetJsonInt(item, "ChannelType"),
+                LanguageLcid = GetJsonInt(item, "LCID")
             };
+
+            // Parse last activity date
+            if (item.TryGetProperty("LastActivityOn", out var lastActivity) &&
+                lastActivity.ValueKind == JsonValueKind.String &&
+                DateTime.TryParse(lastActivity.GetString(), out var lastActivityDate))
+            {
+                site.LastActivityDate = lastActivityDate;
+            }
+
+            // Parse time deleted
+            if (item.TryGetProperty("TimeDeleted", out var timeDeleted) &&
+                timeDeleted.ValueKind == JsonValueKind.String &&
+                DateTime.TryParse(timeDeleted.GetString(), out var timeDeletedDate))
+            {
+                site.TimeDeleted = timeDeletedDate;
+            }
 
             // Parse storage used (can be float like 6144598.0)
             if (item.TryGetProperty("StorageUsed", out var storageUsed) &&
@@ -190,6 +216,28 @@ public class AdminService : IAdminService
         }
         return string.Empty;
     }
+
+    private static int GetJsonInt(JsonElement element, string propertyName)
+    {
+        if (element.TryGetProperty(propertyName, out var prop) &&
+            prop.ValueKind == JsonValueKind.Number)
+        {
+            return prop.GetInt32();
+        }
+        return 0;
+    }
+
+    private static Guid GetJsonGuid(JsonElement element, string propertyName)
+    {
+        if (element.TryGetProperty(propertyName, out var prop) &&
+            prop.ValueKind == JsonValueKind.String &&
+            Guid.TryParse(prop.GetString(), out var guid))
+        {
+            return guid;
+        }
+        return Guid.Empty;
+    }
+
 
     private static string GetTitleFromUrl(string url)
     {

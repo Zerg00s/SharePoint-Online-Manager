@@ -75,34 +75,45 @@ public class TaskDetailScreen : BaseScreen
 
         _runButton = new Button
         {
-            Text = "Run Task",
-            Size = new Size(100, 28),
-            Margin = new Padding(0, 0, 10, 0)
+            Text = "\u25B6 Run Task", // Play symbol
+            Size = new Size(110, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 120, 212),
+            ForeColor = Color.White
         };
+        _runButton.FlatAppearance.BorderSize = 0;
         _runButton.Click += RunButton_Click;
 
         _exportButton = new Button
         {
-            Text = "Export to CSV",
-            Size = new Size(110, 28),
+            Text = "\U0001F4BE Export to CSV", // Floppy disk emoji
+            Size = new Size(130, 28),
             Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
         };
+        _exportButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
         _exportButton.Click += ExportButton_Click;
 
         _deleteButton = new Button
         {
-            Text = "Delete Task",
-            Size = new Size(100, 28),
-            Margin = new Padding(0, 0, 10, 0)
+            Text = "\U0001F5D1 Delete Task", // Wastebasket emoji
+            Size = new Size(110, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.DarkRed
         };
+        _deleteButton.FlatAppearance.BorderColor = Color.DarkRed;
         _deleteButton.Click += DeleteButton_Click;
 
         _manageExclusionsButton = new Button
         {
-            Text = "Manage Exclusions",
-            Size = new Size(130, 28)
+            Text = "\U0001F6AB Manage Exclusions", // No entry emoji
+            Size = new Size(150, 28),
+            FlatStyle = FlatStyle.Flat
         };
+        _manageExclusionsButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
         _manageExclusionsButton.Click += ManageExclusionsButton_Click;
 
         buttonPanel.Controls.AddRange(new Control[] { _runButton, _exportButton, _deleteButton, _manageExclusionsButton });
@@ -224,6 +235,13 @@ public class TaskDetailScreen : BaseScreen
         else if (parameter is TaskDefinition taskDef)
         {
             task = taskDef;
+        }
+
+        // If no parameter but we already have a task (back navigation), use existing task
+        if (task == null && _task != null)
+        {
+            await RefreshTaskDetailsAsync();
+            return;
         }
 
         if (task == null)
@@ -373,7 +391,9 @@ public class TaskDetailScreen : BaseScreen
         }
 
         // Setup for execution
-        _runButton.Text = "Cancel";
+        _runButton.Text = "\u23F9 Cancel"; // Stop symbol
+        _runButton.BackColor = Color.FromArgb(200, 50, 50);
+        _runButton.ForeColor = Color.White;
         _deleteButton.Enabled = false;
         _exportButton.Enabled = false;
 
@@ -419,7 +439,9 @@ public class TaskDetailScreen : BaseScreen
         }
         finally
         {
-            _runButton.Text = "Run Task";
+            _runButton.Text = "\u25B6 Run Task"; // Play symbol
+            _runButton.BackColor = Color.FromArgb(0, 120, 212);
+            _runButton.ForeColor = Color.White;
             _deleteButton.Enabled = true;
             _exportButton.Enabled = _currentResult != null;
             progressPanel.Visible = false;
@@ -539,5 +561,154 @@ public class TaskDetailScreen : BaseScreen
         }
 
         return Task.FromResult(true);
+    }
+}
+
+/// <summary>
+/// Dialog for managing list exclusions.
+/// </summary>
+public class ListExclusionDialog : Form
+{
+    private CheckedListBox _listBox = null!;
+    private Button _selectAllButton = null!;
+    private Button _selectNoneButton = null!;
+    private Button _selectSystemButton = null!;
+
+    public HashSet<string> ExcludedLists { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public ListExclusionDialog(List<string> allLists, IEnumerable<string> currentlyExcluded)
+    {
+        ExcludedLists = new HashSet<string>(currentlyExcluded, StringComparer.OrdinalIgnoreCase);
+        InitializeUI(allLists);
+    }
+
+    private void InitializeUI(List<string> allLists)
+    {
+        Text = "Manage List Exclusions";
+        Size = new Size(500, 500);
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MinimumSize = new Size(400, 350);
+        StartPosition = FormStartPosition.CenterParent;
+
+        var instructionLabel = new Label
+        {
+            Text = "Check the lists you want to EXCLUDE from the report:",
+            Dock = DockStyle.Top,
+            Height = 25,
+            Padding = new Padding(5)
+        };
+
+        var buttonPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 35,
+            FlowDirection = FlowDirection.LeftToRight,
+            Padding = new Padding(5, 0, 5, 5)
+        };
+
+        _selectAllButton = new Button
+        {
+            Text = "Select All",
+            Size = new Size(90, 28),
+            Margin = new Padding(0, 0, 5, 0)
+        };
+        _selectAllButton.Click += (s, e) => SetAllChecked(true);
+
+        _selectNoneButton = new Button
+        {
+            Text = "Select None",
+            Size = new Size(90, 28),
+            Margin = new Padding(0, 0, 5, 0)
+        };
+        _selectNoneButton.Click += (s, e) => SetAllChecked(false);
+
+        _selectSystemButton = new Button
+        {
+            Text = "Select System Lists",
+            Size = new Size(130, 28)
+        };
+        _selectSystemButton.Click += SelectSystemLists_Click;
+
+        buttonPanel.Controls.AddRange(new Control[] { _selectAllButton, _selectNoneButton, _selectSystemButton });
+
+        _listBox = new CheckedListBox
+        {
+            Dock = DockStyle.Fill,
+            CheckOnClick = true
+        };
+
+        // Add all lists to the checkbox list
+        foreach (var list in allLists)
+        {
+            var index = _listBox.Items.Add(list);
+            if (ExcludedLists.Contains(list))
+            {
+                _listBox.SetItemChecked(index, true);
+            }
+        }
+
+        var dialogButtonPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 45,
+            FlowDirection = FlowDirection.RightToLeft,
+            Padding = new Padding(5)
+        };
+
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Size = new Size(80, 28),
+            Margin = new Padding(5, 0, 0, 0)
+        };
+
+        var okButton = new Button
+        {
+            Text = "Apply",
+            DialogResult = DialogResult.OK,
+            Size = new Size(80, 28)
+        };
+        okButton.Click += (s, e) => SaveExclusions();
+
+        dialogButtonPanel.Controls.AddRange(new Control[] { cancelButton, okButton });
+
+        AcceptButton = okButton;
+        CancelButton = cancelButton;
+
+        Controls.Add(_listBox);
+        Controls.Add(buttonPanel);
+        Controls.Add(instructionLabel);
+        Controls.Add(dialogButtonPanel);
+    }
+
+    private void SetAllChecked(bool isChecked)
+    {
+        for (int i = 0; i < _listBox.Items.Count; i++)
+        {
+            _listBox.SetItemChecked(i, isChecked);
+        }
+    }
+
+    private void SelectSystemLists_Click(object? sender, EventArgs e)
+    {
+        var systemLists = new HashSet<string>(
+            ListReportConfiguration.DefaultExcludedLists,
+            StringComparer.OrdinalIgnoreCase);
+
+        for (int i = 0; i < _listBox.Items.Count; i++)
+        {
+            var listName = _listBox.Items[i].ToString() ?? string.Empty;
+            _listBox.SetItemChecked(i, systemLists.Contains(listName));
+        }
+    }
+
+    private void SaveExclusions()
+    {
+        ExcludedLists.Clear();
+        foreach (var item in _listBox.CheckedItems)
+        {
+            ExcludedLists.Add(item.ToString() ?? string.Empty);
+        }
     }
 }

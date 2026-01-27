@@ -49,10 +49,21 @@ public class CsvExporter
             Title = s.Title,
             SiteType = s.SiteTypeDescription,
             Template = s.Template,
+            TemplateDescription = s.TemplateDescription,
             Owner = s.Owner,
-            StorageUsed = s.StorageUsedFormatted,
-            Status = s.Status,
-            LastModified = s.LastModifiedDate
+            Standalone = !s.IsGroupConnected && s.ChannelType == 0 ? "Yes" : "No",
+            Group = s.IsGroupConnected ? "Yes" : "No",
+            Channel = s.ChannelTypeDisplay,
+            Hub = s.HubDisplay,
+            StorageUsedGB = Math.Round(s.StorageUsed / 1073741824.0, 2),
+            FileCount = s.FileCount,
+            PageViews = s.PageViews,
+            LastActivity = s.LastActivityDisplay,
+            ExternalSharing = s.ExternalSharing,
+            State = s.StateDisplay,
+            Language = s.LanguageDisplay,
+            IsDeleted = s.IsDeleted ? "Yes" : "No",
+            TimeDeleted = s.TimeDeleted
         }).ToList();
 
         ExportToCsv(items, filePath);
@@ -242,10 +253,21 @@ public class SiteExportItem
     public string Title { get; set; } = string.Empty;
     public string SiteType { get; set; } = string.Empty;
     public string Template { get; set; } = string.Empty;
+    public string TemplateDescription { get; set; } = string.Empty;
     public string Owner { get; set; } = string.Empty;
-    public string StorageUsed { get; set; } = string.Empty;
-    public string Status { get; set; } = string.Empty;
-    public DateTime LastModified { get; set; }
+    public string Standalone { get; set; } = string.Empty;
+    public string Group { get; set; } = string.Empty;
+    public string Channel { get; set; } = string.Empty;
+    public string Hub { get; set; } = string.Empty;
+    public double StorageUsedGB { get; set; }
+    public int FileCount { get; set; }
+    public int PageViews { get; set; }
+    public string LastActivity { get; set; } = string.Empty;
+    public string ExternalSharing { get; set; } = string.Empty;
+    public string State { get; set; } = string.Empty;
+    public string Language { get; set; } = string.Empty;
+    public string IsDeleted { get; set; } = string.Empty;
+    public DateTime? TimeDeleted { get; set; }
 }
 
 /// <summary>
