@@ -265,6 +265,10 @@ public class TaskListScreen : BaseScreen
         {
             await NavigationService!.NavigateToAsync<RemoveSiteAdminsDetailScreen>(task);
         }
+        else if (task.Type == TaskType.NavigationSettingsSync)
+        {
+            await NavigationService!.NavigateToAsync<NavigationSettingsDetailScreen>(task);
+        }
         else
         {
             await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
@@ -308,6 +312,10 @@ public class TaskListScreen : BaseScreen
         else if (task.Type == TaskType.RemoveSiteCollectionAdmins)
         {
             await NavigationService!.NavigateToAsync<RemoveSiteAdminsDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.NavigationSettingsSync)
+        {
+            await NavigationService!.NavigateToAsync<NavigationSettingsDetailScreen>(execParam);
         }
         else
         {

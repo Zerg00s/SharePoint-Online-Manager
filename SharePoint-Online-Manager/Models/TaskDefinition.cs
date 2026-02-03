@@ -38,7 +38,12 @@ public enum TaskType
     /// <summary>
     /// Remove site collection administrators from selected site collections.
     /// </summary>
-    RemoveSiteCollectionAdmins
+    RemoveSiteCollectionAdmins,
+
+    /// <summary>
+    /// Compare and sync navigation settings (HorizontalQuickLaunch, MegaMenuEnabled) between source and target sites.
+    /// </summary>
+    NavigationSettingsSync
 }
 
 /// <summary>
@@ -83,6 +88,7 @@ public class TaskDefinition
         TaskType.SetSiteState => "Set Site State",
         TaskType.AddSiteCollectionAdmins => "Add Site Admins",
         TaskType.RemoveSiteCollectionAdmins => "Remove Site Admins",
+        TaskType.NavigationSettingsSync => "Navigation Settings",
         _ => Type.ToString()
     };
 
@@ -117,6 +123,7 @@ public static class TaskTypeExtensions
         TaskType.SetSiteState => "Set site state: Unlock, ReadOnly, or NoAccess",
         TaskType.AddSiteCollectionAdmins => "Add up to 5 site collection administrators",
         TaskType.RemoveSiteCollectionAdmins => "Remove up to 5 site collection administrators",
+        TaskType.NavigationSettingsSync => "Compare and sync navigation settings between tenants",
         _ => type.ToString()
     };
 
@@ -132,6 +139,7 @@ public static class TaskTypeExtensions
         TaskType.SetSiteState => "Set Site State",
         TaskType.AddSiteCollectionAdmins => "Add Site Collection Administrators",
         TaskType.RemoveSiteCollectionAdmins => "Remove Site Collection Administrators",
+        TaskType.NavigationSettingsSync => "Navigation Settings Sync",
         _ => type.ToString()
     };
 
@@ -141,6 +149,7 @@ public static class TaskTypeExtensions
     public static bool RequiresDualConnections(this TaskType type) => type switch
     {
         TaskType.ListCompare => true,
+        TaskType.NavigationSettingsSync => true,
         _ => false
     };
 }

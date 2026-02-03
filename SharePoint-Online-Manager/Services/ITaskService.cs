@@ -123,6 +123,32 @@ public interface ITaskService
     /// Saves a permission report result.
     /// </summary>
     Task SavePermissionReportResultAsync(PermissionReportResult result);
+
+    /// <summary>
+    /// Executes a navigation settings sync task and returns the results.
+    /// </summary>
+    Task<NavigationSettingsResult> ExecuteNavigationSettingsSyncAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IConnectionManager connectionManager,
+        bool applyMode = false,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all navigation settings results for a task.
+    /// </summary>
+    Task<List<NavigationSettingsResult>> GetNavigationSettingsResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent navigation settings result for a task.
+    /// </summary>
+    Task<NavigationSettingsResult?> GetLatestNavigationSettingsResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a navigation settings result.
+    /// </summary>
+    Task SaveNavigationSettingsResultAsync(NavigationSettingsResult result);
 }
 
 /// <summary>

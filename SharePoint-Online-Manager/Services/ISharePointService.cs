@@ -140,4 +140,19 @@ public interface ISharePointService : IDisposable
     /// <param name="userLoginName">The login name of the user to remove as admin.</param>
     /// <returns>A result indicating success or failure.</returns>
     Task<SharePointResult<bool>> RemoveSiteCollectionAdminAsync(string siteUrl, string userLoginName);
+
+    /// <summary>
+    /// Gets navigation settings (HorizontalQuickLaunch and MegaMenuEnabled) for a site.
+    /// </summary>
+    /// <param name="siteUrl">The URL of the site.</param>
+    /// <returns>The navigation settings.</returns>
+    Task<SharePointResult<NavigationSettings>> GetNavigationSettingsAsync(string siteUrl);
+
+    /// <summary>
+    /// Sets navigation settings (HorizontalQuickLaunch and MegaMenuEnabled) for a site.
+    /// </summary>
+    /// <param name="siteUrl">The URL of the site.</param>
+    /// <param name="settings">The navigation settings to apply.</param>
+    /// <returns>A result indicating success or failure.</returns>
+    Task<SharePointResult<bool>> SetNavigationSettingsAsync(string siteUrl, NavigationSettings settings);
 }

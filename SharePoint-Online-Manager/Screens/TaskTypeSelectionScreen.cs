@@ -174,6 +174,7 @@ public class TaskTypeSelectionScreen : BaseScreen
         TaskType.SetSiteState => "\u2699", // gear emoji (settings)
         TaskType.AddSiteCollectionAdmins => "\U0001F464", // bust in silhouette emoji (user/admin)
         TaskType.RemoveSiteCollectionAdmins => "\U0001F6AB", // no entry sign emoji (remove)
+        TaskType.NavigationSettingsSync => "\U0001F517", // link emoji (navigation)
         _ => "\U0001F4C4" // page emoji
     };
 
@@ -181,7 +182,7 @@ public class TaskTypeSelectionScreen : BaseScreen
     {
         System.Diagnostics.Debug.WriteLine($"[TaskTypeSelection] OnTaskTypeSelected: {taskType}");
 
-        // AddSiteCollectionAdmins and RemoveSiteCollectionAdmins have their own configuration screens
+        // Tasks with their own configuration screens
         if (taskType == TaskType.AddSiteCollectionAdmins)
         {
             await NavigationService!.NavigateToAsync<AddSiteAdminsConfigScreen>(_context);
@@ -191,6 +192,12 @@ public class TaskTypeSelectionScreen : BaseScreen
         if (taskType == TaskType.RemoveSiteCollectionAdmins)
         {
             await NavigationService!.NavigateToAsync<RemoveSiteAdminsConfigScreen>(_context);
+            return;
+        }
+
+        if (taskType == TaskType.NavigationSettingsSync)
+        {
+            await NavigationService!.NavigateToAsync<NavigationSettingsConfigScreen>(_context);
             return;
         }
 

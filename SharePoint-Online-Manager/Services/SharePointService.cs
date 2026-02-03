@@ -1857,6 +1857,171 @@ public class SharePointService : ISharePointService
 
     #endregion
 
+    #region Navigation Settings Methods
+
+    public async Task<SharePointResult<NavigationSettings>> GetNavigationSettingsAsync(string siteUrl)
+    {
+        try
+        {
+            var baseUrl = siteUrl.TrimEnd('/');
+            var apiUrl = $"{baseUrl}/_api/web?$select=HorizontalQuickLaunch,MegaMenuEnabled";
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetNavigationSettingsAsync - URL: {apiUrl}");
+
+            var response = await _client.GetAsync(apiUrl);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new SharePointResult<NavigationSettings>
+                {
+                    Status = GetSharePointStatus(response.StatusCode),
+                    ErrorMessage = GetErrorMessage(response.StatusCode)
+                };
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // Handle both formats
+            var webData = root;
+            if (webData.TryGetProperty("d", out var dElement))
+            {
+                webData = dElement;
+            }
+
+            var settings = new NavigationSettings
+            {
+                HorizontalQuickLaunch = GetBoolProperty(webData, "HorizontalQuickLaunch"),
+                MegaMenuEnabled = GetBoolProperty(webData, "MegaMenuEnabled")
+            };
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] GetNavigationSettingsAsync - HorizontalQuickLaunch: {settings.HorizontalQuickLaunch}, MegaMenuEnabled: {settings.MegaMenuEnabled}");
+
+            return new SharePointResult<NavigationSettings>
+            {
+                Data = settings,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (HttpRequestException ex)
+        {
+            return new SharePointResult<NavigationSettings>
+            {
+                Status = ex.StatusCode switch
+                {
+                    HttpStatusCode.Unauthorized => SharePointResultStatus.AuthenticationRequired,
+                    HttpStatusCode.Forbidden => SharePointResultStatus.AccessDenied,
+                    HttpStatusCode.NotFound => SharePointResultStatus.NotFound,
+                    _ => SharePointResultStatus.Error
+                },
+                ErrorMessage = ex.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<NavigationSettings>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    public async Task<SharePointResult<bool>> SetNavigationSettingsAsync(string siteUrl, NavigationSettings settings)
+    {
+        try
+        {
+            var baseUrl = siteUrl.TrimEnd('/');
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetNavigationSettingsAsync - SiteUrl: {siteUrl}");
+            System.Diagnostics.Debug.WriteLine($"[SPOManager]   HorizontalQuickLaunch: {settings.HorizontalQuickLaunch}, MegaMenuEnabled: {settings.MegaMenuEnabled}");
+
+            // Get request digest first
+            var digestUrl = $"{baseUrl}/_api/contextinfo";
+            var digestResponse = await _client.PostAsync(digestUrl, new StringContent(""));
+
+            if (!digestResponse.IsSuccessStatusCode)
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = GetSharePointStatus(digestResponse.StatusCode),
+                    ErrorMessage = $"Failed to get request digest: {GetErrorMessage(digestResponse.StatusCode)}"
+                };
+            }
+
+            var digestJson = await digestResponse.Content.ReadAsStringAsync();
+            using var digestDoc = JsonDocument.Parse(digestJson);
+            var formDigestValue = GetStringProperty(digestDoc.RootElement, "FormDigestValue");
+
+            if (string.IsNullOrEmpty(formDigestValue))
+            {
+                if (digestDoc.RootElement.TryGetProperty("d", out var dElement) &&
+                    dElement.TryGetProperty("GetContextWebInformation", out var webInfo))
+                {
+                    formDigestValue = GetStringProperty(webInfo, "FormDigestValue");
+                }
+            }
+
+            // Update the web properties using MERGE
+            var apiUrl = $"{baseUrl}/_api/web";
+            var updateBody = JsonSerializer.Serialize(new
+            {
+                HorizontalQuickLaunch = settings.HorizontalQuickLaunch,
+                MegaMenuEnabled = settings.MegaMenuEnabled
+            });
+
+            var content = new StringContent(updateBody, System.Text.Encoding.UTF8);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json")
+            {
+                Parameters = { new System.Net.Http.Headers.NameValueHeaderValue("odata", "nometadata") }
+            };
+
+            var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
+            {
+                Content = content
+            };
+
+            request.Headers.Add("X-HTTP-Method", "MERGE");
+            request.Headers.Add("IF-MATCH", "*");
+            if (!string.IsNullOrEmpty(formDigestValue))
+            {
+                request.Headers.Add("X-RequestDigest", formDigestValue);
+            }
+
+            var response = await _client.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetNavigationSettingsAsync - Response: {response.StatusCode}");
+
+            if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NoContent)
+            {
+                return new SharePointResult<bool>
+                {
+                    Data = true,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = GetSharePointStatus(response.StatusCode),
+                ErrorMessage = $"{response.StatusCode}: {responseContent}"
+            };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SPOManager] SetNavigationSettingsAsync - Exception: {ex.Message}");
+            return new SharePointResult<bool>
+            {
+                Data = false,
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    #endregion
+
     public void Dispose()
     {
         if (!_disposed)

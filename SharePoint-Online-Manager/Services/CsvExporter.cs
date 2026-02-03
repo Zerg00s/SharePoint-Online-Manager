@@ -218,6 +218,30 @@ public class CsvExporter
         ExportToCsv(items, filePath);
     }
 
+    /// <summary>
+    /// Exports navigation settings comparison results to a CSV file.
+    /// </summary>
+    public void ExportNavigationSettingsReport(NavigationSettingsResult result, string filePath)
+    {
+        var items = result.SiteResults.Select(s => new NavigationSettingsExportItem
+        {
+            SourceSiteUrl = s.SourceSiteUrl,
+            SourceSiteTitle = s.SourceSiteTitle,
+            TargetSiteUrl = s.TargetSiteUrl,
+            TargetSiteTitle = s.TargetSiteTitle,
+            SourceHorizontalNav = s.SourceHorizontalQuickLaunch ? "Yes" : "No",
+            TargetHorizontalNav = s.TargetHorizontalQuickLaunch ? "Yes" : "No",
+            HorizontalNavMatch = s.HorizontalQuickLaunchMatches ? "Yes" : "No",
+            SourceMegaMenu = s.SourceMegaMenuEnabled ? "Yes" : "No",
+            TargetMegaMenu = s.TargetMegaMenuEnabled ? "Yes" : "No",
+            MegaMenuMatch = s.MegaMenuEnabledMatches ? "Yes" : "No",
+            Status = s.StatusDescription,
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
     private static string FormatSize(long bytes)
     {
         string[] sizes = ["B", "KB", "MB", "GB", "TB"];

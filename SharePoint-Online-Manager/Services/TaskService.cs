@@ -1299,4 +1299,296 @@ public class TaskService : ITaskService
         var json = JsonSerializer.Serialize(result, _jsonOptions);
         await File.WriteAllTextAsync(filePath, json);
     }
+
+    public async Task<NavigationSettingsResult> ExecuteNavigationSettingsSyncAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IConnectionManager connectionManager,
+        bool applyMode = false,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new NavigationSettingsResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow,
+            ApplyMode = applyMode
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        // Deserialize configuration
+        if (string.IsNullOrEmpty(task.ConfigurationJson))
+        {
+            result.Success = false;
+            result.ErrorMessage = "Task configuration is missing";
+            result.Log("Error: Task configuration is missing");
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = result.ErrorMessage;
+            await SaveTaskAsync(task);
+            await SaveNavigationSettingsResultAsync(result);
+            return result;
+        }
+
+        NavigationSettingsConfiguration config;
+        try
+        {
+            config = JsonSerializer.Deserialize<NavigationSettingsConfiguration>(task.ConfigurationJson, _jsonOptions)
+                     ?? throw new InvalidOperationException("Failed to deserialize configuration");
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.ErrorMessage = $"Invalid configuration: {ex.Message}";
+            result.Log($"Error: {result.ErrorMessage}");
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = result.ErrorMessage;
+            await SaveTaskAsync(task);
+            await SaveNavigationSettingsResultAsync(result);
+            return result;
+        }
+
+        result.Log($"Starting navigation settings {(applyMode ? "sync" : "compare")} for {config.SitePairs.Count} site pairs");
+
+        try
+        {
+            // Get connections
+            var sourceConnection = await connectionManager.GetConnectionAsync(config.SourceConnectionId);
+            var targetConnection = await connectionManager.GetConnectionAsync(config.TargetConnectionId);
+
+            if (sourceConnection == null || targetConnection == null)
+            {
+                throw new InvalidOperationException("Source or target connection not found");
+            }
+
+            result.Log($"Source connection: {sourceConnection.Name}");
+            result.Log($"Target connection: {targetConnection.Name}");
+
+            // Get cookies for source connection
+            var sourceCookies = authService.GetStoredCookies(sourceConnection.TenantDomain)
+                                ?? authService.GetStoredCookies(sourceConnection.AdminDomain);
+            if (sourceCookies == null || !sourceCookies.IsValid)
+            {
+                throw new InvalidOperationException(
+                    $"No valid credentials for source tenant {sourceConnection.TenantName}. Please authenticate first.");
+            }
+
+            // Get cookies for target connection
+            var targetCookies = authService.GetStoredCookies(targetConnection.TenantDomain)
+                                ?? authService.GetStoredCookies(targetConnection.AdminDomain);
+            if (targetCookies == null || !targetCookies.IsValid)
+            {
+                throw new InvalidOperationException(
+                    $"No valid credentials for target tenant {targetConnection.TenantName}. Please authenticate first.");
+            }
+
+            // Create services
+            using var sourceService = new SharePointService(sourceCookies, sourceConnection.TenantDomain);
+            using var targetService = new SharePointService(targetCookies, targetConnection.TenantDomain);
+
+            int processedCount = 0;
+
+            foreach (var pair in config.SitePairs)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                processedCount++;
+                progress?.Report(new TaskProgress
+                {
+                    CurrentSite = processedCount,
+                    TotalSites = config.SitePairs.Count,
+                    CurrentSiteUrl = pair.SourceUrl,
+                    Message = $"{(applyMode ? "Applying" : "Comparing")} {processedCount}/{config.SitePairs.Count}: {pair.SourceUrl}"
+                });
+
+                result.Log($"Processing pair {processedCount}: {pair.SourceUrl} <-> {pair.TargetUrl}");
+
+                var siteResult = new NavigationSettingsCompareItem
+                {
+                    SourceSiteUrl = pair.SourceUrl,
+                    TargetSiteUrl = pair.TargetUrl
+                };
+
+                try
+                {
+                    // Get source site info and navigation settings
+                    var sourceInfo = await sourceService.GetSiteInfoAsync(pair.SourceUrl);
+                    siteResult.SourceSiteTitle = sourceInfo.Title;
+
+                    var sourceSettingsResult = await sourceService.GetNavigationSettingsAsync(pair.SourceUrl);
+                    if (!sourceSettingsResult.IsSuccess || sourceSettingsResult.Data == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed to get source navigation settings: {sourceSettingsResult.ErrorMessage}");
+                    }
+
+                    siteResult.SourceHorizontalQuickLaunch = sourceSettingsResult.Data.HorizontalQuickLaunch;
+                    siteResult.SourceMegaMenuEnabled = sourceSettingsResult.Data.MegaMenuEnabled;
+
+                    // Get target site info and navigation settings
+                    var targetInfo = await targetService.GetSiteInfoAsync(pair.TargetUrl);
+                    siteResult.TargetSiteTitle = targetInfo.Title;
+
+                    var targetSettingsResult = await targetService.GetNavigationSettingsAsync(pair.TargetUrl);
+                    if (!targetSettingsResult.IsSuccess || targetSettingsResult.Data == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed to get target navigation settings: {targetSettingsResult.ErrorMessage}");
+                    }
+
+                    siteResult.TargetHorizontalQuickLaunch = targetSettingsResult.Data.HorizontalQuickLaunch;
+                    siteResult.TargetMegaMenuEnabled = targetSettingsResult.Data.MegaMenuEnabled;
+
+                    result.Log($"  Source: HQL={siteResult.SourceHorizontalQuickLaunch}, MegaMenu={siteResult.SourceMegaMenuEnabled}");
+                    result.Log($"  Target: HQL={siteResult.TargetHorizontalQuickLaunch}, MegaMenu={siteResult.TargetMegaMenuEnabled}");
+
+                    // Determine status
+                    if (siteResult.AllSettingsMatch)
+                    {
+                        siteResult.Status = NavigationSettingsStatus.Match;
+                        result.MatchingPairs++;
+                        result.Log($"  Status: Match");
+                    }
+                    else
+                    {
+                        if (applyMode)
+                        {
+                            // Apply source settings to target
+                            result.Log($"  Applying settings to target...");
+                            var applyResult = await targetService.SetNavigationSettingsAsync(
+                                pair.TargetUrl,
+                                new NavigationSettings
+                                {
+                                    HorizontalQuickLaunch = siteResult.SourceHorizontalQuickLaunch,
+                                    MegaMenuEnabled = siteResult.SourceMegaMenuEnabled
+                                });
+
+                            if (applyResult.IsSuccess && applyResult.Data)
+                            {
+                                siteResult.Status = NavigationSettingsStatus.Applied;
+                                siteResult.TargetHorizontalQuickLaunch = siteResult.SourceHorizontalQuickLaunch;
+                                siteResult.TargetMegaMenuEnabled = siteResult.SourceMegaMenuEnabled;
+                                result.AppliedPairs++;
+                                result.Log($"  Status: Applied successfully");
+                            }
+                            else
+                            {
+                                siteResult.Status = NavigationSettingsStatus.Failed;
+                                siteResult.ErrorMessage = applyResult.ErrorMessage ?? "Failed to apply settings";
+                                result.FailedPairs++;
+                                result.Log($"  Status: Failed - {siteResult.ErrorMessage}");
+                            }
+                        }
+                        else
+                        {
+                            siteResult.Status = NavigationSettingsStatus.Mismatch;
+                            result.MismatchedPairs++;
+                            result.Log($"  Status: Mismatch");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    siteResult.Status = NavigationSettingsStatus.Error;
+                    siteResult.ErrorMessage = ex.Message;
+                    result.FailedPairs++;
+                    result.Log($"  Error: {ex.Message}");
+                }
+
+                result.SiteResults.Add(siteResult);
+                result.TotalPairsProcessed++;
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedPairs == 0;
+
+            if (applyMode)
+            {
+                result.Log($"Sync completed. Applied: {result.AppliedPairs}, Failed: {result.FailedPairs}");
+            }
+            else
+            {
+                result.Log($"Compare completed. Matches: {result.MatchingPairs}, Mismatches: {result.MismatchedPairs}");
+            }
+
+            task.Status = result.FailedPairs == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedPairs > 0)
+            {
+                task.LastError = $"{result.FailedPairs} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveNavigationSettingsResultAsync(result);
+
+        return result;
+    }
+
+    public async Task<List<NavigationSettingsResult>> GetNavigationSettingsResultsAsync(Guid taskId)
+    {
+        var results = new List<NavigationSettingsResult>();
+        var pattern = $"navsettings_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<NavigationSettingsResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<NavigationSettingsResult?> GetLatestNavigationSettingsResultAsync(Guid taskId)
+    {
+        var results = await GetNavigationSettingsResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveNavigationSettingsResultAsync(NavigationSettingsResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"navsettings_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
 }
