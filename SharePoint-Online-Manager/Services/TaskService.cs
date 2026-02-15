@@ -12,6 +12,7 @@ public class TaskService : ITaskService
 {
     private readonly IDataStore<TaskDefinition> _taskStore;
     private readonly string _resultsFolder;
+    private readonly string _cacheFolder;
     private readonly JsonSerializerOptions _jsonOptions;
 
     public TaskService()
@@ -21,12 +22,15 @@ public class TaskService : ITaskService
             t => t.Id,
             (t, id) => t.Id = id);
 
-        _resultsFolder = Path.Combine(
+        var appDataFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "SharePointOnlineManager",
-            "results");
+            "SharePointOnlineManager");
+
+        _resultsFolder = Path.Combine(appDataFolder, "results");
+        _cacheFolder = Path.Combine(appDataFolder, "cache", "DocumentCompare");
 
         Directory.CreateDirectory(_resultsFolder);
+        Directory.CreateDirectory(_cacheFolder);
 
         _jsonOptions = new JsonSerializerOptions
         {
@@ -1586,6 +1590,1221 @@ public class TaskService : ITaskService
     {
         var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
         var fileName = $"navsettings_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public async Task<DocumentCompareResult> ExecuteDocumentCompareAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IConnectionManager connectionManager,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default,
+        bool continueFromPrevious = false,
+        Func<string, string, Task<AuthCookies?>>? reauthCallback = null)
+    {
+        var result = new DocumentCompareResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        // Load previous result if continuing
+        DocumentCompareResult? previousResult = null;
+        HashSet<string> completedPairKeys = new(StringComparer.OrdinalIgnoreCase);
+
+        if (continueFromPrevious)
+        {
+            previousResult = await GetLatestDocumentCompareResultAsync(task.Id);
+            if (previousResult != null)
+            {
+                // Build set of completed source URLs (we use source URL as the unique key)
+                foreach (var siteResult in previousResult.SiteResults.Where(s => s.Success))
+                {
+                    completedPairKeys.Add(siteResult.SourceSiteUrl);
+                }
+
+                // Copy previous results to new result
+                result.SiteResults.AddRange(previousResult.SiteResults.Where(s => s.Success));
+                result.SuccessfulPairs = previousResult.SuccessfulPairs;
+                result.TotalPairsProcessed = previousResult.SiteResults.Count(s => s.Success);
+                result.ThrottleRetryCount = previousResult.ThrottleRetryCount;
+
+                // Copy execution log
+                foreach (var logEntry in previousResult.ExecutionLog)
+                {
+                    result.ExecutionLog.Add(logEntry);
+                }
+                result.Log($"--- Continuing from previous run ({completedPairKeys.Count} pairs already completed) ---");
+            }
+        }
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        // Deserialize configuration
+        if (string.IsNullOrEmpty(task.ConfigurationJson))
+        {
+            result.Success = false;
+            result.ErrorMessage = "Task configuration is missing";
+            result.Log("Error: Task configuration is missing");
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = result.ErrorMessage;
+            await SaveTaskAsync(task);
+            await SaveDocumentCompareResultAsync(result);
+            return result;
+        }
+
+        DocumentCompareConfiguration config;
+        try
+        {
+            config = JsonSerializer.Deserialize<DocumentCompareConfiguration>(task.ConfigurationJson, _jsonOptions)
+                     ?? throw new InvalidOperationException("Failed to deserialize configuration");
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.ErrorMessage = $"Invalid configuration: {ex.Message}";
+            result.Log($"Error: {result.ErrorMessage}");
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = result.ErrorMessage;
+            await SaveTaskAsync(task);
+            await SaveDocumentCompareResultAsync(result);
+            return result;
+        }
+
+        result.Log($"Starting document compare task for {config.SitePairs.Count} site pairs");
+
+        try
+        {
+            // Get connections
+            var sourceConnection = await connectionManager.GetConnectionAsync(config.SourceConnectionId);
+            var targetConnection = await connectionManager.GetConnectionAsync(config.TargetConnectionId);
+
+            if (sourceConnection == null || targetConnection == null)
+            {
+                throw new InvalidOperationException("Source or target connection not found");
+            }
+
+            result.Log($"Source connection: {sourceConnection.Name}");
+            result.Log($"Target connection: {targetConnection.Name}");
+
+            // Build exclusion list
+            var excludedLibraries = new HashSet<string>(config.ExcludedLibraries, StringComparer.OrdinalIgnoreCase);
+            foreach (var defaultExcluded in DocumentCompareConfiguration.DefaultExcludedLibraries)
+            {
+                excludedLibraries.Add(defaultExcluded);
+            }
+
+            result.Log($"Excluded libraries: {excludedLibraries.Count}");
+
+            // Get cookies for source connection
+            var sourceCookies = authService.GetStoredCookies(sourceConnection.TenantDomain)
+                                ?? authService.GetStoredCookies(sourceConnection.AdminDomain);
+            if (sourceCookies == null || !sourceCookies.IsValid)
+            {
+                throw new InvalidOperationException(
+                    $"No valid credentials for source tenant {sourceConnection.TenantName}. Please authenticate first.");
+            }
+
+            // Get cookies for target connection
+            var targetCookies = authService.GetStoredCookies(targetConnection.TenantDomain)
+                                ?? authService.GetStoredCookies(targetConnection.AdminDomain);
+            if (targetCookies == null || !targetCookies.IsValid)
+            {
+                throw new InvalidOperationException(
+                    $"No valid credentials for target tenant {targetConnection.TenantName}. Please authenticate first.");
+            }
+
+            // Create services (manually disposable for re-auth support)
+            var sourceService = new SharePointService(sourceCookies, sourceConnection.TenantDomain);
+            var targetService = new SharePointService(targetCookies, targetConnection.TenantDomain);
+
+            // Track whether re-auth was declined per tenant
+            bool sourceReauthDeclined = false;
+            bool targetReauthDeclined = false;
+
+            int processedCount = 0;
+
+            try
+            {
+
+            foreach (var pair in config.SitePairs)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                processedCount++;
+
+                // Skip if already completed in previous run
+                if (completedPairKeys.Contains(pair.SourceUrl))
+                {
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = config.SitePairs.Count,
+                        CurrentSiteUrl = pair.SourceUrl,
+                        Message = $"Skipping {processedCount}/{config.SitePairs.Count} (already completed): {pair.SourceUrl}"
+                    });
+                    continue;
+                }
+
+                progress?.Report(new TaskProgress
+                {
+                    CurrentSite = processedCount,
+                    TotalSites = config.SitePairs.Count,
+                    CurrentSiteUrl = pair.SourceUrl,
+                    Message = $"Comparing {processedCount}/{config.SitePairs.Count}: {pair.SourceUrl}"
+                });
+
+                result.Log($"Processing pair {processedCount}: {pair.SourceUrl} <-> {pair.TargetUrl}");
+
+                var siteResult = new SiteDocumentCompareResult
+                {
+                    SourceSiteUrl = pair.SourceUrl,
+                    TargetSiteUrl = pair.TargetUrl
+                };
+
+                try
+                {
+                    // Get source site info
+                    var sourceInfo = await sourceService.GetSiteInfoAsync(pair.SourceUrl);
+
+                    // Check for source auth failure
+                    if (!sourceInfo.IsConnected && IsAuthError(sourceInfo.ErrorMessage))
+                    {
+                        if (!sourceReauthDeclined && reauthCallback != null)
+                        {
+                            result.Log($"  Authentication failed for {sourceConnection.TenantDomain} — prompting re-authentication...");
+                            var freshCookies = await reauthCallback(sourceConnection.TenantName, sourceConnection.TenantDomain);
+                            if (freshCookies != null)
+                            {
+                                sourceService.Dispose();
+                                sourceService = new SharePointService(freshCookies, sourceConnection.TenantDomain);
+                                result.Log($"  Re-authenticated to {sourceConnection.TenantDomain}, retrying...");
+                                sourceInfo = await sourceService.GetSiteInfoAsync(pair.SourceUrl);
+                            }
+                            else
+                            {
+                                sourceReauthDeclined = true;
+                                result.Log($"  Re-authentication declined for {sourceConnection.TenantDomain}");
+                            }
+                        }
+                    }
+
+                    siteResult.SourceSiteTitle = sourceInfo.Title;
+
+                    // Get target site info
+                    var targetInfo = await targetService.GetSiteInfoAsync(pair.TargetUrl);
+
+                    // Check for target auth failure
+                    if (!targetInfo.IsConnected && IsAuthError(targetInfo.ErrorMessage))
+                    {
+                        if (!targetReauthDeclined && reauthCallback != null)
+                        {
+                            result.Log($"  Authentication failed for {targetConnection.TenantDomain} — prompting re-authentication...");
+                            var freshCookies = await reauthCallback(targetConnection.TenantName, targetConnection.TenantDomain);
+                            if (freshCookies != null)
+                            {
+                                targetService.Dispose();
+                                targetService = new SharePointService(freshCookies, targetConnection.TenantDomain);
+                                result.Log($"  Re-authenticated to {targetConnection.TenantDomain}, retrying...");
+                                targetInfo = await targetService.GetSiteInfoAsync(pair.TargetUrl);
+                            }
+                            else
+                            {
+                                targetReauthDeclined = true;
+                                result.Log($"  Re-authentication declined for {targetConnection.TenantDomain}");
+                            }
+                        }
+                    }
+
+                    siteResult.TargetSiteTitle = targetInfo.Title;
+
+                    // Get document libraries from source (BaseTemplate = 101)
+                    var sourceListsResult = await sourceService.GetListsAsync(pair.SourceUrl, config.IncludeHiddenLibraries);
+
+                    // Check for source auth failure on GetListsAsync
+                    if (sourceListsResult.NeedsReauth || sourceListsResult.Status == SharePointResultStatus.AccessDenied)
+                    {
+                        if (!sourceReauthDeclined && reauthCallback != null)
+                        {
+                            result.Log($"  Authentication failed for {sourceConnection.TenantDomain} — prompting re-authentication...");
+                            var freshCookies = await reauthCallback(sourceConnection.TenantName, sourceConnection.TenantDomain);
+                            if (freshCookies != null)
+                            {
+                                sourceService.Dispose();
+                                sourceService = new SharePointService(freshCookies, sourceConnection.TenantDomain);
+                                result.Log($"  Re-authenticated to {sourceConnection.TenantDomain}, retrying...");
+                                sourceListsResult = await sourceService.GetListsAsync(pair.SourceUrl, config.IncludeHiddenLibraries);
+                            }
+                            else
+                            {
+                                sourceReauthDeclined = true;
+                                result.Log($"  Re-authentication declined for {sourceConnection.TenantDomain}");
+                            }
+                        }
+                    }
+
+                    if (!sourceListsResult.IsSuccess || sourceListsResult.Data == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed to get source libraries: {sourceListsResult.ErrorMessage}");
+                    }
+
+                    var sourceLibraries = sourceListsResult.Data
+                        .Where(l => l.BaseTemplate == 101 && !excludedLibraries.Contains(l.Title))
+                        .ToList();
+
+                    result.Log($"  Source: {sourceLibraries.Count} document libraries");
+
+                    // Get document libraries from target
+                    var targetListsResult = await targetService.GetListsAsync(pair.TargetUrl, config.IncludeHiddenLibraries);
+
+                    // Check for target auth failure on GetListsAsync
+                    if (targetListsResult.NeedsReauth || targetListsResult.Status == SharePointResultStatus.AccessDenied)
+                    {
+                        if (!targetReauthDeclined && reauthCallback != null)
+                        {
+                            result.Log($"  Authentication failed for {targetConnection.TenantDomain} — prompting re-authentication...");
+                            var freshCookies = await reauthCallback(targetConnection.TenantName, targetConnection.TenantDomain);
+                            if (freshCookies != null)
+                            {
+                                targetService.Dispose();
+                                targetService = new SharePointService(freshCookies, targetConnection.TenantDomain);
+                                result.Log($"  Re-authenticated to {targetConnection.TenantDomain}, retrying...");
+                                targetListsResult = await targetService.GetListsAsync(pair.TargetUrl, config.IncludeHiddenLibraries);
+                            }
+                            else
+                            {
+                                targetReauthDeclined = true;
+                                result.Log($"  Re-authentication declined for {targetConnection.TenantDomain}");
+                            }
+                        }
+                    }
+
+                    if (!targetListsResult.IsSuccess || targetListsResult.Data == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed to get target libraries: {targetListsResult.ErrorMessage}");
+                    }
+
+                    var targetLibraries = targetListsResult.Data
+                        .Where(l => l.BaseTemplate == 101 && !excludedLibraries.Contains(l.Title))
+                        .ToDictionary(l => l.Title, StringComparer.OrdinalIgnoreCase);
+
+                    // Process each source library
+                    int libraryIndex = 0;
+                    foreach (var sourceLibrary in sourceLibraries)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        libraryIndex++;
+
+                        siteResult.LibrariesProcessed++;
+                        var libraryItemCount = sourceLibrary.ItemCount;
+                        var sizeInfo = libraryItemCount > 0 ? $" ({libraryItemCount:N0} items)" : "";
+                        result.Log($"  Processing library: {sourceLibrary.Title}{sizeInfo}");
+
+                        // Check if library exists on target first (quick lookup)
+                        var libraryExistsOnTarget = targetLibraries.ContainsKey(sourceLibrary.Title);
+                        var targetLibrary = libraryExistsOnTarget ? targetLibraries[sourceLibrary.Title] : null;
+                        var targetSizeInfo = targetLibrary?.ItemCount > 0 ? $" ({targetLibrary.ItemCount:N0} items)" : "";
+
+                        // Report library-level progress
+                        progress?.Report(new TaskProgress
+                        {
+                            CurrentSite = processedCount,
+                            TotalSites = config.SitePairs.Count,
+                            CurrentSiteUrl = pair.SourceUrl,
+                            Message = $"Site {processedCount}/{config.SitePairs.Count} - Library {libraryIndex}/{sourceLibraries.Count}: {sourceLibrary.Title}{sizeInfo}"
+                        });
+
+                        // Try to get documents from cache first if enabled
+                        List<DocumentCompareSourceItem>? sourceDocs = null;
+                        List<DocumentCompareSourceItem>? targetDocs = null;
+                        bool sourceFromCache = false;
+                        bool targetFromCache = false;
+
+                        if (config.UseCache)
+                        {
+                            var sourceCacheEntry = TryGetCachedDocuments(pair.SourceUrl, sourceLibrary.Title, config.CacheExpirationHours);
+                            if (sourceCacheEntry != null)
+                            {
+                                sourceDocs = sourceCacheEntry.Documents;
+                                // Re-compute relative paths using current extraction logic
+                                // (cached paths may be stale if algorithm changed since caching)
+                                SharePointService.RecomputeRelativePaths(sourceDocs, sourceLibrary.Title, pair.SourceUrl);
+                                sourceFromCache = true;
+                            }
+
+                            if (libraryExistsOnTarget)
+                            {
+                                var targetCacheEntry = TryGetCachedDocuments(pair.TargetUrl, sourceLibrary.Title, config.CacheExpirationHours);
+                                if (targetCacheEntry != null)
+                                {
+                                    targetDocs = targetCacheEntry.Documents;
+                                    SharePointService.RecomputeRelativePaths(targetDocs, sourceLibrary.Title, pair.TargetUrl);
+                                    targetFromCache = true;
+                                }
+                            }
+                        }
+
+                        // Fetch any documents not in cache
+                        if (sourceDocs == null || (libraryExistsOnTarget && targetDocs == null))
+                        {
+                            var cacheStatus = config.UseCache
+                                ? $" (cache: src={sourceFromCache}, tgt={targetFromCache})"
+                                : "";
+                            result.Log($"    Fetching source{sizeInfo} and target{targetSizeInfo} in parallel...{cacheStatus}");
+
+                            // Only fetch what we don't have cached
+                            var sourceDocsTask = sourceDocs == null
+                                ? sourceService.GetDocumentsForCompareAsync(
+                                    pair.SourceUrl,
+                                    sourceLibrary.Title,
+                                    config.IncludeAspxPages,
+                                    new Progress<string>(msg => result.Log($"    Source: {msg}")),
+                                    cancellationToken)
+                                : Task.FromResult(new SharePointResult<List<DocumentCompareSourceItem>>
+                                {
+                                    Data = sourceDocs,
+                                    Status = SharePointResultStatus.Success
+                                });
+
+                            var targetDocsTask = !libraryExistsOnTarget
+                                ? Task.FromResult(new SharePointResult<List<DocumentCompareSourceItem>>
+                                {
+                                    Data = null,
+                                    Status = SharePointResultStatus.NotFound,
+                                    ErrorMessage = "Library not found on target"
+                                })
+                                : targetDocs != null
+                                    ? Task.FromResult(new SharePointResult<List<DocumentCompareSourceItem>>
+                                    {
+                                        Data = targetDocs,
+                                        Status = SharePointResultStatus.Success
+                                    })
+                                    : targetService.GetDocumentsForCompareAsync(
+                                        pair.TargetUrl,
+                                        sourceLibrary.Title,
+                                        config.IncludeAspxPages,
+                                        new Progress<string>(msg => result.Log($"    Target: {msg}")),
+                                        cancellationToken);
+
+                            await Task.WhenAll(sourceDocsTask, targetDocsTask);
+
+                            var sourceDocsResult = await sourceDocsTask;
+                            var targetDocsResult = await targetDocsTask;
+
+                            if (!sourceDocsResult.IsSuccess || sourceDocsResult.Data == null)
+                            {
+                                result.Log($"    Error getting source docs: {sourceDocsResult.ErrorMessage}");
+                                continue;
+                            }
+
+                            sourceDocs = sourceDocsResult.Data;
+
+                            // Save to cache if we fetched fresh data
+                            if (config.UseCache && !sourceFromCache)
+                            {
+                                SaveToCache(pair.SourceUrl, sourceLibrary.Title, sourceDocs);
+                            }
+
+                            if (targetDocsResult.IsSuccess && targetDocsResult.Data != null)
+                            {
+                                targetDocs = targetDocsResult.Data;
+                                if (config.UseCache && !targetFromCache)
+                                {
+                                    SaveToCache(pair.TargetUrl, sourceLibrary.Title, targetDocs);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            result.Log($"    Using cached data for source and target");
+                        }
+
+                        var cacheIndicator = sourceFromCache ? " (cached)" : "";
+                        result.Log($"    Source: {sourceDocs.Count} documents{cacheIndicator}");
+
+                        // Check if library exists on target
+                        if (!libraryExistsOnTarget)
+                        {
+                            // All documents are SourceOnly
+                            foreach (var sourceDoc in sourceDocs)
+                            {
+                                siteResult.DocumentComparisons.Add(new DocumentCompareItem
+                                {
+                                    SourceSiteUrl = pair.SourceUrl,
+                                    TargetSiteUrl = pair.TargetUrl,
+                                    LibraryName = sourceLibrary.Title,
+                                    ItemType = sourceDoc.ItemType,
+                                    FileName = sourceDoc.FileName,
+                                    FileExtension = sourceDoc.ItemType == DocumentCompareItemType.Folder ? "" : Path.GetExtension(sourceDoc.FileName).TrimStart('.'),
+                                    RelativePath = sourceDoc.RelativePath,
+                                    SourceItemId = sourceDoc.Id,
+                                    SourceSizeBytes = sourceDoc.SizeBytes,
+                                    SourceVersionCount = sourceDoc.VersionCount,
+                                    SourceAbsolutePath = BuildAbsoluteUrl(pair.SourceUrl, sourceDoc.ServerRelativeUrl),
+                                    SourceCreated = sourceDoc.Created,
+                                    SourceModified = sourceDoc.Modified,
+                                    Status = DocumentCompareStatus.SourceOnly
+                                });
+                            }
+                            result.Log($"    Library not found on target - {sourceDocs.Count} source-only items");
+                            continue;
+                        }
+
+                        if (targetDocs == null)
+                        {
+                            result.Log($"    Error getting target docs - treating as source-only");
+                            // Treat as all source-only
+                            foreach (var sourceDoc in sourceDocs)
+                            {
+                                siteResult.DocumentComparisons.Add(new DocumentCompareItem
+                                {
+                                    SourceSiteUrl = pair.SourceUrl,
+                                    TargetSiteUrl = pair.TargetUrl,
+                                    LibraryName = sourceLibrary.Title,
+                                    ItemType = sourceDoc.ItemType,
+                                    FileName = sourceDoc.FileName,
+                                    FileExtension = sourceDoc.ItemType == DocumentCompareItemType.Folder ? "" : Path.GetExtension(sourceDoc.FileName).TrimStart('.'),
+                                    RelativePath = sourceDoc.RelativePath,
+                                    SourceItemId = sourceDoc.Id,
+                                    SourceSizeBytes = sourceDoc.SizeBytes,
+                                    SourceVersionCount = sourceDoc.VersionCount,
+                                    SourceAbsolutePath = BuildAbsoluteUrl(pair.SourceUrl, sourceDoc.ServerRelativeUrl),
+                                    SourceCreated = sourceDoc.Created,
+                                    SourceModified = sourceDoc.Modified,
+                                    Status = DocumentCompareStatus.SourceOnly
+                                });
+                            }
+                            continue;
+                        }
+
+                        var targetCacheIndicator = targetFromCache ? " (cached)" : "";
+                        result.Log($"    Target: {targetDocs.Count} documents{targetCacheIndicator}");
+
+                        // Deduplicate source docs by relative path (SharePoint API may return duplicates)
+                        var sourceDeduped = new Dictionary<string, DocumentCompareSourceItem>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var doc in sourceDocs)
+                        {
+                            sourceDeduped.TryAdd(doc.RelativePath, doc);
+                        }
+                        if (sourceDeduped.Count < sourceDocs.Count)
+                        {
+                            result.Log($"    Removed {sourceDocs.Count - sourceDeduped.Count} duplicate source entries");
+                            sourceDocs = sourceDeduped.Values.ToList();
+                        }
+
+                        // Index target docs by relative path (case-insensitive), handling duplicates
+                        var targetByPath = new Dictionary<string, DocumentCompareSourceItem>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var doc in targetDocs)
+                        {
+                            if (!targetByPath.TryAdd(doc.RelativePath, doc))
+                            {
+                                result.Log($"    WARNING: Duplicate target file path: {doc.RelativePath}");
+                            }
+                        }
+
+                        // Build secondary index using normalized paths (ShareGate character replacement)
+                        // ShareGate often replaces these characters with underscore: " * : < > ? / \ & # % { } ~
+                        // Only build if normalization is enabled
+                        Dictionary<string, DocumentCompareSourceItem>? targetByNormalizedPath = null;
+                        if (config.UseShareGateNormalization)
+                        {
+                            targetByNormalizedPath = new Dictionary<string, DocumentCompareSourceItem>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var doc in targetDocs)
+                            {
+                                var normalizedPath = NormalizePathForShareGate(doc.RelativePath);
+                                targetByNormalizedPath.TryAdd(normalizedPath, doc);
+                            }
+                        }
+
+                        // Compare documents
+                        int foundCount = 0, sizeIssueCount = 0, sourceOnlyCount = 0;
+
+                        foreach (var sourceDoc in sourceDocs)
+                        {
+                            var comparison = new DocumentCompareItem
+                            {
+                                SourceSiteUrl = pair.SourceUrl,
+                                TargetSiteUrl = pair.TargetUrl,
+                                LibraryName = sourceLibrary.Title,
+                                ItemType = sourceDoc.ItemType,
+                                FileName = sourceDoc.FileName,
+                                FileExtension = sourceDoc.ItemType == DocumentCompareItemType.Folder ? "" : Path.GetExtension(sourceDoc.FileName).TrimStart('.'),
+                                RelativePath = sourceDoc.RelativePath,
+                                SourceItemId = sourceDoc.Id,
+                                SourceSizeBytes = sourceDoc.SizeBytes,
+                                SourceVersionCount = sourceDoc.VersionCount,
+                                SourceAbsolutePath = BuildAbsoluteUrl(pair.SourceUrl, sourceDoc.ServerRelativeUrl),
+                                SourceCreated = sourceDoc.Created,
+                                SourceModified = sourceDoc.Modified
+                            };
+
+                            // Try exact match first
+                            DocumentCompareSourceItem? targetDoc = null;
+                            string? matchedTargetPath = null;
+
+                            if (targetByPath.TryGetValue(sourceDoc.RelativePath, out targetDoc))
+                            {
+                                matchedTargetPath = sourceDoc.RelativePath;
+                            }
+                            // Try normalized path match only if enabled in config
+                            else if (config.UseShareGateNormalization && targetByNormalizedPath != null)
+                            {
+                                var normalizedSourcePath = NormalizePathForShareGate(sourceDoc.RelativePath);
+                                if (targetByNormalizedPath.TryGetValue(normalizedSourcePath, out targetDoc))
+                                {
+                                    matchedTargetPath = targetDoc.RelativePath;
+                                }
+                            }
+
+                            if (targetDoc != null && matchedTargetPath != null)
+                            {
+                                comparison.TargetItemId = targetDoc.Id;
+                                comparison.TargetSizeBytes = targetDoc.SizeBytes;
+                                comparison.TargetVersionCount = targetDoc.VersionCount;
+                                comparison.TargetAbsolutePath = BuildAbsoluteUrl(pair.TargetUrl, targetDoc.ServerRelativeUrl);
+                                comparison.TargetCreated = targetDoc.Created;
+                                comparison.TargetModified = targetDoc.Modified;
+
+                                // Check for concerning size issues (only for files, not folders):
+                                // 1. Target is 0 bytes when source > 0
+                                // 2. Source > 50KB and target < 30% of source size
+                                bool hasSizeIssue = false;
+                                if (sourceDoc.ItemType == DocumentCompareItemType.File)
+                                {
+                                    if (targetDoc.SizeBytes == 0 && sourceDoc.SizeBytes > 0)
+                                    {
+                                        hasSizeIssue = true;
+                                    }
+                                    else if (sourceDoc.SizeBytes > 50 * 1024 && targetDoc.SizeBytes < sourceDoc.SizeBytes * 0.3)
+                                    {
+                                        hasSizeIssue = true;
+                                    }
+                                }
+
+                                if (hasSizeIssue)
+                                {
+                                    comparison.Status = DocumentCompareStatus.SizeIssue;
+                                    sizeIssueCount++;
+                                }
+                                else
+                                {
+                                    comparison.Status = DocumentCompareStatus.Found;
+                                    foundCount++;
+                                }
+
+                                // Remove from target dicts to track target-only later
+                                targetByPath.Remove(matchedTargetPath);
+                                if (config.UseShareGateNormalization && targetByNormalizedPath != null)
+                                {
+                                    targetByNormalizedPath.Remove(NormalizePathForShareGate(matchedTargetPath));
+                                }
+                            }
+                            else
+                            {
+                                comparison.Status = DocumentCompareStatus.SourceOnly;
+                                sourceOnlyCount++;
+                            }
+
+                            siteResult.DocumentComparisons.Add(comparison);
+                        }
+
+                        // Add target-only documents and folders
+                        int targetOnlyCount = 0;
+                        foreach (var targetDoc in targetByPath.Values)
+                        {
+                            siteResult.DocumentComparisons.Add(new DocumentCompareItem
+                            {
+                                SourceSiteUrl = pair.SourceUrl,
+                                TargetSiteUrl = pair.TargetUrl,
+                                LibraryName = sourceLibrary.Title,
+                                ItemType = targetDoc.ItemType,
+                                FileName = targetDoc.FileName,
+                                FileExtension = targetDoc.ItemType == DocumentCompareItemType.Folder ? "" : Path.GetExtension(targetDoc.FileName).TrimStart('.'),
+                                RelativePath = targetDoc.RelativePath,
+                                TargetItemId = targetDoc.Id,
+                                TargetSizeBytes = targetDoc.SizeBytes,
+                                TargetVersionCount = targetDoc.VersionCount,
+                                TargetAbsolutePath = BuildAbsoluteUrl(pair.TargetUrl, targetDoc.ServerRelativeUrl),
+                                TargetCreated = targetDoc.Created,
+                                TargetModified = targetDoc.Modified,
+                                Status = DocumentCompareStatus.TargetOnly
+                            });
+                            targetOnlyCount++;
+                        }
+
+                        var newerAtSourceCount = siteResult.DocumentComparisons.Count(dc => dc.IsNewerAtSource);
+                        result.Log($"    Results: {foundCount} found, {sizeIssueCount} size issues, {sourceOnlyCount} source-only, {targetOnlyCount} target-only, {newerAtSourceCount} newer-at-source");
+                    }
+
+                    siteResult.Success = true;
+                    result.SuccessfulPairs++;
+
+                    result.Log($"  Site completed: {siteResult.TotalDocuments} documents compared");
+                }
+                catch (Exception ex)
+                {
+                    siteResult.Success = false;
+                    siteResult.ErrorMessage = ex.Message;
+                    result.FailedPairs++;
+                    result.Log($"  Error: {ex.Message}");
+                }
+
+                result.SiteResults.Add(siteResult);
+                result.TotalPairsProcessed++;
+
+                // Report completed site for real-time UI update
+                progress?.Report(new TaskProgress
+                {
+                    CurrentSite = processedCount,
+                    TotalSites = config.SitePairs.Count,
+                    CurrentSiteUrl = pair.SourceUrl,
+                    Message = $"Completed {processedCount}/{config.SitePairs.Count}: {pair.SourceUrl}",
+                    CompletedSiteResult = siteResult
+                });
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedPairs == 0;
+
+            var (found, sizeIssues, sourceOnly, targetOnly, newerAtSource) = result.GetSummary();
+            result.Log($"Task completed. Successful: {result.SuccessfulPairs}, Failed: {result.FailedPairs}");
+            result.Log($"Total: {found} found, {sizeIssues} size issues, {sourceOnly} source-only, {targetOnly} target-only, {newerAtSource} newer-at-source");
+
+            task.Status = result.FailedPairs == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedPairs > 0)
+            {
+                task.LastError = $"{result.FailedPairs} site pair(s) failed";
+            }
+
+            } // end inner try
+            finally
+            {
+                sourceService.Dispose();
+                targetService.Dispose();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveDocumentCompareResultAsync(result);
+
+        return result;
+    }
+
+    private static string BuildAbsoluteUrl(string siteUrl, string serverRelativeUrl)
+    {
+        try
+        {
+            var siteUri = new Uri(siteUrl);
+            return $"{siteUri.Scheme}://{siteUri.Host}{serverRelativeUrl}";
+        }
+        catch
+        {
+            return serverRelativeUrl;
+        }
+    }
+
+    private static bool IsAuthError(string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(errorMessage)) return false;
+        return errorMessage.Contains("Authentication failed", StringComparison.OrdinalIgnoreCase)
+            || errorMessage.Contains("Access denied", StringComparison.OrdinalIgnoreCase)
+            || errorMessage.Contains("cookies may have expired", StringComparison.OrdinalIgnoreCase);
+    }
+
+    #region Document Compare Cache
+
+    /// <summary>
+    /// Gets the cache file path for a specific site and library.
+    /// </summary>
+    private string GetCacheFilePath(string siteUrl, string libraryTitle)
+    {
+        // Create a safe filename from site URL and library
+        var key = $"{siteUrl}|{libraryTitle}".ToLowerInvariant();
+        var hash = Convert.ToBase64String(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(key)))
+            .Replace("/", "_")
+            .Replace("+", "-")
+            .Replace("=", "")[..16];
+        return Path.Combine(_cacheFolder, $"{hash}.json");
+    }
+
+    /// <summary>
+    /// Tries to get cached documents for a site/library combination.
+    /// </summary>
+    private DocumentCompareCacheEntry? TryGetCachedDocuments(string siteUrl, string libraryTitle, int expirationHours)
+    {
+        var filePath = GetCacheFilePath(siteUrl, libraryTitle);
+        if (!File.Exists(filePath))
+            return null;
+
+        try
+        {
+            var json = File.ReadAllText(filePath);
+            var entry = JsonSerializer.Deserialize<DocumentCompareCacheEntry>(json, _jsonOptions);
+            if (entry != null && entry.IsValid(expirationHours))
+            {
+                return entry;
+            }
+            // Cache expired, delete it
+            File.Delete(filePath);
+        }
+        catch
+        {
+            // Ignore cache read errors
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Saves documents to cache.
+    /// </summary>
+    private void SaveToCache(string siteUrl, string libraryTitle, List<DocumentCompareSourceItem> documents)
+    {
+        var entry = new DocumentCompareCacheEntry
+        {
+            CachedAt = DateTime.UtcNow,
+            SiteUrl = siteUrl,
+            LibraryTitle = libraryTitle,
+            Documents = documents
+        };
+
+        var filePath = GetCacheFilePath(siteUrl, libraryTitle);
+        try
+        {
+            var json = JsonSerializer.Serialize(entry, _jsonOptions);
+            File.WriteAllText(filePath, json);
+        }
+        catch
+        {
+            // Ignore cache write errors
+        }
+    }
+
+    #endregion
+
+    /// <summary>
+    /// Normalizes a path by simulating ShareGate's character replacement during migration.
+    /// ShareGate URL-encodes filenames first (space → %20, etc.), then replaces % with _.
+    /// It also replaces special characters: " * : &lt; &gt; ? \ &amp; # % { } ~ with underscore.
+    /// And handles consecutive dots: .. → _., ... → __., etc.
+    /// Note: Forward slash is preserved as path separator.
+    /// </summary>
+    private static string NormalizePathForShareGate(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return path;
+
+        // Step 1: Replace special characters with underscores
+        // " * : < > ? \ & # % { } ~
+        var result = new System.Text.StringBuilder(path.Length);
+
+        foreach (var c in path)
+        {
+            if (c == '/' || c == '.')
+            {
+                // Preserve path separators and dots (for extensions)
+                result.Append(c);
+            }
+            else if (c == ' ')
+            {
+                // ShareGate URL-encodes spaces to %20, then replaces % with _
+                // Net effect: space becomes _20
+                result.Append("_20");
+            }
+            else if (c == '"' || c == '*' || c == ':' || c == '<' || c == '>' ||
+                     c == '?' || c == '\\' || c == '&' || c == '#' || c == '%' ||
+                     c == '{' || c == '}' || c == '~')
+            {
+                result.Append('_');
+            }
+            else
+            {
+                result.Append(c);
+            }
+        }
+
+        // Step 2: Handle consecutive dots: ShareGate replaces dot-pairs with _.
+        // .. → _.   (1 pair)
+        // ... → __.  (pair + remaining dot, needs 2 passes)
+        // .... → _._. (2 pairs)
+        // ...... → _._._. (3 pairs)
+        var normalized = result.ToString();
+        while (normalized.Contains(".."))
+        {
+            normalized = normalized.Replace("..", "_.");
+        }
+
+        return normalized;
+    }
+
+    public async Task<List<DocumentCompareResult>> GetDocumentCompareResultsAsync(Guid taskId)
+    {
+        var results = new List<DocumentCompareResult>();
+        var pattern = $"doccompare_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                // Use streaming deserialization to avoid huge string allocation for large files
+                await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
+                var result = await JsonSerializer.DeserializeAsync<DocumentCompareResult>(stream, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<DocumentCompareResult?> GetLatestDocumentCompareResultAsync(Guid taskId)
+    {
+        var pattern = $"doccompare_{taskId}_*.json";
+        var latestFile = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f)
+            .FirstOrDefault();
+
+        if (latestFile == null)
+            return null;
+
+        try
+        {
+            // Use streaming deserialization to avoid huge string allocation for large files
+            await using var stream = new FileStream(latestFile, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
+            return await JsonSerializer.DeserializeAsync<DocumentCompareResult>(stream, _jsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task SaveDocumentCompareResultAsync(DocumentCompareResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"doccompare_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        // Use streaming serialization to avoid huge string allocation
+        await using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, useAsync: true);
+        await JsonSerializer.SerializeAsync(stream, result, _jsonOptions);
+    }
+
+    public async Task<SiteAccessResult> ExecuteSiteAccessCheckAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IConnectionManager connectionManager,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new SiteAccessResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        // Deserialize configuration
+        if (string.IsNullOrEmpty(task.ConfigurationJson))
+        {
+            result.Success = false;
+            result.ErrorMessage = "Task configuration is missing";
+            result.Log("Error: Task configuration is missing");
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = result.ErrorMessage;
+            await SaveTaskAsync(task);
+            await SaveSiteAccessResultAsync(result);
+            return result;
+        }
+
+        SiteAccessConfiguration config;
+        try
+        {
+            config = JsonSerializer.Deserialize<SiteAccessConfiguration>(task.ConfigurationJson, _jsonOptions)
+                     ?? throw new InvalidOperationException("Failed to deserialize configuration");
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.ErrorMessage = $"Invalid configuration: {ex.Message}";
+            result.Log($"Error: {result.ErrorMessage}");
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = result.ErrorMessage;
+            await SaveTaskAsync(task);
+            await SaveSiteAccessResultAsync(result);
+            return result;
+        }
+
+        result.Log($"Starting site access check for {config.SitePairs.Count} site pairs");
+
+        try
+        {
+            // Get connections
+            var sourceConnection = await connectionManager.GetConnectionAsync(config.SourceConnectionId);
+            var targetConnection = await connectionManager.GetConnectionAsync(config.TargetConnectionId);
+
+            if (sourceConnection == null || targetConnection == null)
+            {
+                throw new InvalidOperationException("Source or target connection not found");
+            }
+
+            result.Log($"Source connection: {sourceConnection.Name}");
+            result.Log($"Target connection: {targetConnection.Name}");
+
+            // Get cookies for source connection
+            var sourceCookies = authService.GetStoredCookies(sourceConnection.TenantDomain)
+                                ?? authService.GetStoredCookies(sourceConnection.AdminDomain);
+            if (sourceCookies == null || !sourceCookies.IsValid)
+            {
+                throw new InvalidOperationException(
+                    $"No valid credentials for source tenant {sourceConnection.TenantName}. Please authenticate first.");
+            }
+
+            // Get cookies for target connection
+            var targetCookies = authService.GetStoredCookies(targetConnection.TenantDomain)
+                                ?? authService.GetStoredCookies(targetConnection.AdminDomain);
+            if (targetCookies == null || !targetCookies.IsValid)
+            {
+                throw new InvalidOperationException(
+                    $"No valid credentials for target tenant {targetConnection.TenantName}. Please authenticate first.");
+            }
+
+            // Set account names from cookies (actual user emails)
+            result.SourceAccount = sourceCookies.UserEmail ?? sourceConnection.Name;
+            result.TargetAccount = targetCookies.UserEmail ?? targetConnection.Name;
+            result.Log($"Source account: {result.SourceAccount}");
+            result.Log($"Target account: {result.TargetAccount}");
+
+            // Create services
+            using var sourceService = new SharePointService(sourceCookies, sourceConnection.TenantDomain);
+            using var targetService = new SharePointService(targetCookies, targetConnection.TenantDomain);
+
+            int processedCount = 0;
+
+            foreach (var pair in config.SitePairs)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                processedCount++;
+                progress?.Report(new TaskProgress
+                {
+                    CurrentSite = processedCount,
+                    TotalSites = config.SitePairs.Count,
+                    CurrentSiteUrl = pair.SourceUrl,
+                    Message = $"Checking {processedCount}/{config.SitePairs.Count}: {pair.SourceUrl}"
+                });
+
+                result.Log($"Checking pair {processedCount}: {pair.SourceUrl} <-> {pair.TargetUrl}");
+
+                var pairResult = new SitePairAccessResult
+                {
+                    SourceSiteUrl = pair.SourceUrl,
+                    TargetSiteUrl = pair.TargetUrl
+                };
+
+                // Check source site access
+                pairResult.SourceResult = await CheckSiteAccessAsync(
+                    sourceService, pair.SourceUrl, result.SourceAccount ?? sourceConnection.Name, true);
+                result.Log($"  Source: {pairResult.SourceResult.StatusDescription}");
+
+                // Check target site access
+                pairResult.TargetResult = await CheckSiteAccessAsync(
+                    targetService, pair.TargetUrl, result.TargetAccount ?? targetConnection.Name, false);
+                result.Log($"  Target: {pairResult.TargetResult.StatusDescription}");
+
+                result.PairResults.Add(pairResult);
+                result.TotalPairsProcessed++;
+
+                // Report completed pair for real-time UI update
+                progress?.Report(new TaskProgress
+                {
+                    CurrentSite = processedCount,
+                    TotalSites = config.SitePairs.Count,
+                    CurrentSiteUrl = pair.SourceUrl,
+                    Message = $"Checked {processedCount}/{config.SitePairs.Count}: {pair.SourceUrl}",
+                    CompletedAccessPairResult = pairResult
+                });
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = true;
+
+            result.Log($"Task completed. Processed: {result.TotalPairsProcessed} pairs");
+            result.Log($"Source: {result.SourceAccessibleCount} accessible, {result.SourceAccessDeniedCount} access denied, {result.SourceOtherIssuesCount} other issues");
+            result.Log($"Target: {result.TargetAccessibleCount} accessible, {result.TargetAccessDeniedCount} access denied, {result.TargetOtherIssuesCount} other issues");
+
+            task.Status = Models.TaskStatus.Completed;
+            task.CompletedAt = DateTime.UtcNow;
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveSiteAccessResultAsync(result);
+
+        return result;
+    }
+
+    private static async Task<SiteAccessCheckItem> CheckSiteAccessAsync(
+        SharePointService service, string siteUrl, string accountName, bool isSource)
+    {
+        var result = new SiteAccessCheckItem
+        {
+            SiteUrl = siteUrl,
+            AccountUsed = accountName,
+            IsSource = isSource
+        };
+
+        try
+        {
+            var siteInfo = await service.GetSiteInfoAsync(siteUrl);
+
+            if (siteInfo.IsConnected)
+            {
+                result.SiteTitle = siteInfo.Title ?? "";
+                result.Status = SiteAccessStatus.Accessible;
+            }
+            else
+            {
+                result.Status = ParseAccessStatus(siteInfo.ErrorMessage);
+                result.ErrorMessage = siteInfo.ErrorMessage;
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            result.Status = ex.StatusCode switch
+            {
+                System.Net.HttpStatusCode.Forbidden => SiteAccessStatus.AccessDenied,
+                System.Net.HttpStatusCode.NotFound => SiteAccessStatus.NotFound,
+                System.Net.HttpStatusCode.Unauthorized => SiteAccessStatus.AuthenticationRequired,
+                _ => SiteAccessStatus.Error
+            };
+            result.ErrorMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            result.Status = SiteAccessStatus.Error;
+            result.ErrorMessage = ex.Message;
+        }
+
+        return result;
+    }
+
+    private static SiteAccessStatus ParseAccessStatus(string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(errorMessage))
+            return SiteAccessStatus.Error;
+
+        if (errorMessage.Contains("403") || errorMessage.Contains("Forbidden", StringComparison.OrdinalIgnoreCase))
+            return SiteAccessStatus.AccessDenied;
+
+        if (errorMessage.Contains("404") || errorMessage.Contains("Not Found", StringComparison.OrdinalIgnoreCase))
+            return SiteAccessStatus.NotFound;
+
+        if (errorMessage.Contains("401") || errorMessage.Contains("Unauthorized", StringComparison.OrdinalIgnoreCase))
+            return SiteAccessStatus.AuthenticationRequired;
+
+        return SiteAccessStatus.Error;
+    }
+
+    public async Task<List<SiteAccessResult>> GetSiteAccessResultsAsync(Guid taskId)
+    {
+        var results = new List<SiteAccessResult>();
+        var pattern = $"siteaccess_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<SiteAccessResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<SiteAccessResult?> GetLatestSiteAccessResultAsync(Guid taskId)
+    {
+        var results = await GetSiteAccessResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveSiteAccessResultAsync(SiteAccessResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"siteaccess_{result.TaskId}_{timestamp}.json";
         var filePath = Path.Combine(_resultsFolder, fileName);
 
         var json = JsonSerializer.Serialize(result, _jsonOptions);

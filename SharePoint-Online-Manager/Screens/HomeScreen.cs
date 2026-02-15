@@ -11,14 +11,23 @@ namespace SharePointOnlineManager.Screens;
 public class HomeScreen : BaseScreen
 {
     private ListView _connectionsListView = null!;
+    private ListView _tenantPairsListView = null!;
     private Button _newAdminConnectionButton = null!;
     private Button _newSiteConnectionButton = null!;
     private Button _connectButton = null!;
     private Button _reauthButton = null!;
     private Button _deleteButton = null!;
+    private Button _setRoleButton = null!;
     private Button _listCompareButton = null!;
+    private Button _navSettingsButton = null!;
+    private Button _docCompareButton = null!;
+    private Button _siteAccessButton = null!;
+    private Button _addPairButton = null!;
+    private Button _deletePairButton = null!;
+    private ToolTip _toolTip = null!;
     private IConnectionManager _connectionManager = null!;
     private IAuthenticationService _authService = null!;
+    private ITenantPairService _tenantPairService = null!;
 
     public override string ScreenTitle => "Connections";
     public override bool ShowBackButton => false;
@@ -27,12 +36,22 @@ public class HomeScreen : BaseScreen
     {
         _connectionManager = GetRequiredService<IConnectionManager>();
         _authService = GetRequiredService<IAuthenticationService>();
+        _tenantPairService = GetRequiredService<ITenantPairService>();
         InitializeUI();
     }
 
     private void InitializeUI()
     {
         SuspendLayout();
+
+        // Initialize tooltip
+        _toolTip = new ToolTip
+        {
+            AutoPopDelay = 5000,
+            InitialDelay = 500,
+            ReshowDelay = 100,
+            ShowAlways = true
+        };
 
         // Header panel with buttons
         var headerPanel = new FlowLayoutPanel
@@ -106,16 +125,73 @@ public class HomeScreen : BaseScreen
         _deleteButton.FlatAppearance.BorderSize = 1;
         _deleteButton.Click += DeleteButton_Click;
 
+        _setRoleButton = new Button
+        {
+            Text = "\U0001F3AF Set Role", // Target emoji
+            Size = new Size(100, 32),
+            Margin = new Padding(0, 0, 10, 0),
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat
+        };
+        _setRoleButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _setRoleButton.FlatAppearance.BorderSize = 1;
+        _setRoleButton.Click += SetRoleButton_Click;
+
         _listCompareButton = new Button
         {
-            Text = "\U0001F504 List Compare", // Arrows clockwise emoji
+            Text = "\U0001F504 Compare Lists", // Arrows clockwise emoji
             Size = new Size(130, 32),
-            Margin = new Padding(20, 0, 0, 0),
+            Margin = new Padding(20, 0, 10, 0),
             FlatStyle = FlatStyle.Flat
         };
         _listCompareButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
         _listCompareButton.FlatAppearance.BorderSize = 1;
         _listCompareButton.Click += ListCompareButton_Click;
+
+        _navSettingsButton = new Button
+        {
+            Text = "\U0001F517 Nav Settings Sync", // Link emoji
+            Size = new Size(150, 32),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat
+        };
+        _navSettingsButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _navSettingsButton.FlatAppearance.BorderSize = 1;
+        _navSettingsButton.Click += NavSettingsButton_Click;
+
+        _docCompareButton = new Button
+        {
+            Text = "\U0001F4C4 Compare Documents", // Page emoji
+            Size = new Size(160, 32),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat
+        };
+        _docCompareButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _docCompareButton.FlatAppearance.BorderSize = 1;
+        _docCompareButton.Click += DocCompareButton_Click;
+
+        _siteAccessButton = new Button
+        {
+            Text = "\U0001F511 Site Access Check", // Key emoji
+            Size = new Size(150, 32),
+            Margin = new Padding(0, 0, 0, 0),
+            FlatStyle = FlatStyle.Flat
+        };
+        _siteAccessButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _siteAccessButton.FlatAppearance.BorderSize = 1;
+        _siteAccessButton.Click += SiteAccessButton_Click;
+
+        // Add tooltips to task buttons
+        _toolTip.SetToolTip(_listCompareButton, "Compare list item counts between source and target sites");
+        _toolTip.SetToolTip(_navSettingsButton, "Compare and sync navigation settings between tenants");
+        _toolTip.SetToolTip(_docCompareButton, "Compare documents between source and target sites");
+        _toolTip.SetToolTip(_siteAccessButton, "Check site access for source and target accounts");
+        _toolTip.SetToolTip(_newAdminConnectionButton, "Create a new admin-level connection to a SharePoint tenant");
+        _toolTip.SetToolTip(_newSiteConnectionButton, "Create a new connection to a specific site collection");
+        _toolTip.SetToolTip(_connectButton, "Connect to the selected SharePoint tenant or site");
+        _toolTip.SetToolTip(_reauthButton, "Clear cached credentials and sign in again");
+        _toolTip.SetToolTip(_deleteButton, "Delete the selected connection");
+        _toolTip.SetToolTip(_setRoleButton, "Set the role (Source/Target) for the selected connection");
 
         headerPanel.Controls.AddRange(new Control[]
         {
@@ -124,8 +200,22 @@ public class HomeScreen : BaseScreen
             _connectButton,
             _reauthButton,
             _deleteButton,
-            _listCompareButton
+            _setRoleButton,
+            _listCompareButton,
+            _navSettingsButton,
+            _docCompareButton,
+            _siteAccessButton
         });
+
+        // Main split container for connections and tenant pairs
+        var splitContainer = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            SplitterDistance = 250,
+            Panel1MinSize = 100,
+            Panel2MinSize = 100
+        };
 
         // Connections ListView
         _connectionsListView = new ListView
@@ -136,18 +226,90 @@ public class HomeScreen : BaseScreen
             GridLines = true,
             MultiSelect = false
         };
-        _connectionsListView.Columns.Add("Name", 130);
-        _connectionsListView.Columns.Add("Type", 65);
-        _connectionsListView.Columns.Add("Tenant/URL", 160);
-        _connectionsListView.Columns.Add("Account", 150);
-        _connectionsListView.Columns.Add("Token Expires", 160);
+        _connectionsListView.Columns.Add("Name", 120);
+        _connectionsListView.Columns.Add("Role", 55);
+        _connectionsListView.Columns.Add("Type", 55);
+        _connectionsListView.Columns.Add("Tenant/URL", 140);
+        _connectionsListView.Columns.Add("Account", 140);
+        _connectionsListView.Columns.Add("Token Expires", 140);
         _connectionsListView.Columns.Add("Token Life", 65);
         _connectionsListView.Columns.Add("Last Connected", 100);
 
         _connectionsListView.SelectedIndexChanged += ConnectionsListView_SelectedIndexChanged;
         _connectionsListView.DoubleClick += ConnectionsListView_DoubleClick;
 
-        Controls.Add(_connectionsListView);
+        splitContainer.Panel1.Controls.Add(_connectionsListView);
+
+        // Tenant Pairs section
+        var pairsPanel = new Panel { Dock = DockStyle.Fill };
+
+        var pairsHeaderPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 40,
+            FlowDirection = FlowDirection.LeftToRight,
+            Padding = new Padding(0, 5, 0, 5)
+        };
+
+        var pairsLabel = new Label
+        {
+            Text = "Tenant Pairs (Source \u2192 Target)",
+            Font = new Font(Font.FontFamily, 10, FontStyle.Bold),
+            AutoSize = true,
+            Margin = new Padding(0, 6, 20, 0)
+        };
+
+        _addPairButton = new Button
+        {
+            Text = "\u2795 Add Pair",
+            Size = new Size(100, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 120, 212),
+            ForeColor = Color.White
+        };
+        _addPairButton.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 212);
+        _addPairButton.FlatAppearance.BorderSize = 1;
+        _addPairButton.Click += AddPairButton_Click;
+
+        _deletePairButton = new Button
+        {
+            Text = "\U0001F5D1 Delete Pair",
+            Size = new Size(110, 28),
+            Margin = new Padding(0, 0, 10, 0),
+            Enabled = false,
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.DarkRed
+        };
+        _deletePairButton.FlatAppearance.BorderColor = Color.DarkRed;
+        _deletePairButton.FlatAppearance.BorderSize = 1;
+        _deletePairButton.Click += DeletePairButton_Click;
+
+        _toolTip.SetToolTip(_addPairButton, "Add a new source-to-target tenant pair");
+        _toolTip.SetToolTip(_deletePairButton, "Delete the selected tenant pair");
+
+        pairsHeaderPanel.Controls.AddRange(new Control[] { pairsLabel, _addPairButton, _deletePairButton });
+
+        _tenantPairsListView = new ListView
+        {
+            Dock = DockStyle.Fill,
+            View = View.Details,
+            FullRowSelect = true,
+            GridLines = true,
+            MultiSelect = false
+        };
+        _tenantPairsListView.Columns.Add("Source Tenant", 200);
+        _tenantPairsListView.Columns.Add("", 40);
+        _tenantPairsListView.Columns.Add("Target Tenant", 200);
+        _tenantPairsListView.Columns.Add("Name", 150);
+        _tenantPairsListView.SelectedIndexChanged += TenantPairsListView_SelectedIndexChanged;
+
+        pairsPanel.Controls.Add(_tenantPairsListView);
+        pairsPanel.Controls.Add(pairsHeaderPanel);
+
+        splitContainer.Panel2.Controls.Add(pairsPanel);
+
+        Controls.Add(splitContainer);
         Controls.Add(headerPanel);
 
         ResumeLayout(true);
@@ -156,6 +318,7 @@ public class HomeScreen : BaseScreen
     public override async Task OnNavigatedToAsync(object? parameter = null)
     {
         await RefreshConnectionsAsync();
+        await RefreshTenantPairsAsync();
     }
 
     private async Task RefreshConnectionsAsync()
@@ -183,6 +346,7 @@ public class HomeScreen : BaseScreen
             {
                 Tag = conn
             };
+            item.SubItems.Add(conn.RoleDescription);
             item.SubItems.Add(conn.Type.ToString());
             item.SubItems.Add(conn.Type == ConnectionType.Admin ? conn.TenantName : conn.SiteUrl ?? "");
 
@@ -255,6 +419,7 @@ public class HomeScreen : BaseScreen
         _connectButton.Enabled = hasSelection;
         _reauthButton.Enabled = hasSelection;
         _deleteButton.Enabled = hasSelection;
+        _setRoleButton.Enabled = hasSelection;
     }
 
     private async void ConnectionsListView_DoubleClick(object? sender, EventArgs e)
@@ -413,6 +578,122 @@ public class HomeScreen : BaseScreen
     private async void ListCompareButton_Click(object? sender, EventArgs e)
     {
         await NavigationService!.NavigateToAsync<ListCompareConfigScreen>();
+    }
+
+    private async void NavSettingsButton_Click(object? sender, EventArgs e)
+    {
+        await NavigationService!.NavigateToAsync<NavigationSettingsConfigScreen>();
+    }
+
+    private async void DocCompareButton_Click(object? sender, EventArgs e)
+    {
+        await NavigationService!.NavigateToAsync<DocumentCompareConfigScreen>();
+    }
+
+    private async void SiteAccessButton_Click(object? sender, EventArgs e)
+    {
+        await NavigationService!.NavigateToAsync<SiteAccessConfigScreen>();
+    }
+
+    private async void SetRoleButton_Click(object? sender, EventArgs e)
+    {
+        if (_connectionsListView.SelectedItems.Count == 0)
+            return;
+
+        var connection = (Connection)_connectionsListView.SelectedItems[0].Tag;
+
+        using var dialog = new SetRoleDialog(connection.Role);
+        if (dialog.ShowDialog(FindForm()) == DialogResult.OK)
+        {
+            connection.Role = dialog.SelectedRole;
+            await _connectionManager.SaveConnectionAsync(connection);
+            await RefreshConnectionsAsync();
+            SetStatus($"Role set to '{connection.RoleDescription}' for '{connection.Name}'");
+        }
+    }
+
+    private void TenantPairsListView_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        _deletePairButton.Enabled = _tenantPairsListView.SelectedItems.Count > 0;
+    }
+
+    private async void AddPairButton_Click(object? sender, EventArgs e)
+    {
+        var connections = await _connectionManager.GetAllConnectionsAsync();
+        var sourceConnections = connections.Where(c => c.Role == TenantRole.Source).ToList();
+        var targetConnections = connections.Where(c => c.Role == TenantRole.Target).ToList();
+
+        if (sourceConnections.Count == 0 || targetConnections.Count == 0)
+        {
+            MessageBox.Show(
+                "You need at least one Source connection and one Target connection to create a pair.\n\n" +
+                "Use the 'Set Role' button to mark connections as Source or Target.",
+                "Cannot Create Pair",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        using var dialog = new AddTenantPairDialog(sourceConnections, targetConnections);
+        if (dialog.ShowDialog(FindForm()) == DialogResult.OK && dialog.TenantPair != null)
+        {
+            await _tenantPairService.SavePairAsync(dialog.TenantPair);
+            await RefreshTenantPairsAsync();
+            SetStatus("Tenant pair added");
+        }
+    }
+
+    private async void DeletePairButton_Click(object? sender, EventArgs e)
+    {
+        if (_tenantPairsListView.SelectedItems.Count == 0)
+            return;
+
+        var pair = (TenantPair)_tenantPairsListView.SelectedItems[0].Tag;
+
+        var result = MessageBox.Show(
+            "Are you sure you want to delete this tenant pair?",
+            "Delete Pair",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (result == DialogResult.Yes)
+        {
+            await _tenantPairService.DeletePairAsync(pair.Id);
+            await RefreshTenantPairsAsync();
+            SetStatus("Tenant pair deleted");
+        }
+    }
+
+    private async Task RefreshTenantPairsAsync()
+    {
+        var pairs = await _tenantPairService.GetAllPairsAsync();
+        var connections = await _connectionManager.GetAllConnectionsAsync();
+
+        _tenantPairsListView.Items.Clear();
+
+        foreach (var pair in pairs)
+        {
+            var sourceConn = connections.FirstOrDefault(c => c.Id == pair.SourceConnectionId);
+            var targetConn = connections.FirstOrDefault(c => c.Id == pair.TargetConnectionId);
+
+            var item = new ListViewItem(sourceConn?.Name ?? "(deleted)")
+            {
+                Tag = pair
+            };
+            item.SubItems.Add("\u2192"); // Arrow
+            item.SubItems.Add(targetConn?.Name ?? "(deleted)");
+            item.SubItems.Add(pair.Name ?? "");
+
+            // Gray out if connections are missing
+            if (sourceConn == null || targetConn == null)
+            {
+                item.ForeColor = Color.Gray;
+            }
+
+            _tenantPairsListView.Items.Add(item);
+        }
+
+        _deletePairButton.Enabled = false;
     }
 }
 
@@ -580,5 +861,212 @@ public class AddConnectionDialog : Form
                 SiteUrl = _siteUrlTextBox.Text.Trim()
             };
         }
+    }
+}
+
+/// <summary>
+/// Dialog for setting the role of a connection.
+/// </summary>
+public class SetRoleDialog : Form
+{
+    private ComboBox _roleComboBox = null!;
+
+    public TenantRole SelectedRole { get; private set; }
+
+    public SetRoleDialog(TenantRole currentRole)
+    {
+        SelectedRole = currentRole;
+        InitializeUI();
+    }
+
+    private void InitializeUI()
+    {
+        Text = "Set Connection Role";
+        Size = new Size(300, 150);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+
+        var roleLabel = new Label
+        {
+            Text = "Role:",
+            Location = new Point(15, 20),
+            AutoSize = true
+        };
+
+        _roleComboBox = new ComboBox
+        {
+            Location = new Point(15, 45),
+            Size = new Size(250, 23),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _roleComboBox.Items.AddRange(["(None)", "Source", "Target"]);
+        _roleComboBox.SelectedIndex = SelectedRole switch
+        {
+            TenantRole.Source => 1,
+            TenantRole.Target => 2,
+            _ => 0
+        };
+
+        var okButton = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            Location = new Point(105, 80),
+            Size = new Size(75, 28)
+        };
+        okButton.Click += (s, e) =>
+        {
+            SelectedRole = _roleComboBox.SelectedIndex switch
+            {
+                1 => TenantRole.Source,
+                2 => TenantRole.Target,
+                _ => TenantRole.Unspecified
+            };
+        };
+
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(190, 80),
+            Size = new Size(75, 28)
+        };
+
+        AcceptButton = okButton;
+        CancelButton = cancelButton;
+
+        Controls.AddRange(new Control[] { roleLabel, _roleComboBox, okButton, cancelButton });
+    }
+}
+
+/// <summary>
+/// Dialog for adding a tenant pair.
+/// </summary>
+public class AddTenantPairDialog : Form
+{
+    private ComboBox _sourceComboBox = null!;
+    private ComboBox _targetComboBox = null!;
+    private TextBox _nameTextBox = null!;
+    private readonly List<Connection> _sourceConnections;
+    private readonly List<Connection> _targetConnections;
+
+    public TenantPair? TenantPair { get; private set; }
+
+    public AddTenantPairDialog(List<Connection> sourceConnections, List<Connection> targetConnections)
+    {
+        _sourceConnections = sourceConnections;
+        _targetConnections = targetConnections;
+        InitializeUI();
+    }
+
+    private void InitializeUI()
+    {
+        Text = "Add Tenant Pair";
+        Size = new Size(400, 260);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+
+        var sourceLabel = new Label
+        {
+            Text = "Source Tenant:",
+            Location = new Point(15, 20),
+            AutoSize = true
+        };
+
+        _sourceComboBox = new ComboBox
+        {
+            Location = new Point(15, 40),
+            Size = new Size(350, 23),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        foreach (var conn in _sourceConnections)
+        {
+            _sourceComboBox.Items.Add(conn.Name);
+        }
+        if (_sourceComboBox.Items.Count > 0)
+            _sourceComboBox.SelectedIndex = 0;
+
+        var targetLabel = new Label
+        {
+            Text = "Target Tenant:",
+            Location = new Point(15, 70),
+            AutoSize = true
+        };
+
+        _targetComboBox = new ComboBox
+        {
+            Location = new Point(15, 90),
+            Size = new Size(350, 23),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        foreach (var conn in _targetConnections)
+        {
+            _targetComboBox.Items.Add(conn.Name);
+        }
+        if (_targetComboBox.Items.Count > 0)
+            _targetComboBox.SelectedIndex = 0;
+
+        var nameLabel = new Label
+        {
+            Text = "Pair Name (optional):",
+            Location = new Point(15, 120),
+            AutoSize = true
+        };
+
+        _nameTextBox = new TextBox
+        {
+            Location = new Point(15, 140),
+            Size = new Size(350, 23)
+        };
+
+        var okButton = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            Location = new Point(205, 175),
+            Size = new Size(75, 28)
+        };
+        okButton.Click += OkButton_Click;
+
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(290, 175),
+            Size = new Size(75, 28)
+        };
+
+        AcceptButton = okButton;
+        CancelButton = cancelButton;
+
+        Controls.AddRange(new Control[]
+        {
+            sourceLabel, _sourceComboBox,
+            targetLabel, _targetComboBox,
+            nameLabel, _nameTextBox,
+            okButton, cancelButton
+        });
+    }
+
+    private void OkButton_Click(object? sender, EventArgs e)
+    {
+        if (_sourceComboBox.SelectedIndex < 0 || _targetComboBox.SelectedIndex < 0)
+        {
+            MessageBox.Show("Please select both source and target connections.", "Validation",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            DialogResult = DialogResult.None;
+            return;
+        }
+
+        TenantPair = new TenantPair
+        {
+            SourceConnectionId = _sourceConnections[_sourceComboBox.SelectedIndex].Id,
+            TargetConnectionId = _targetConnections[_targetComboBox.SelectedIndex].Id,
+            Name = string.IsNullOrWhiteSpace(_nameTextBox.Text) ? null : _nameTextBox.Text.Trim()
+        };
     }
 }

@@ -242,6 +242,170 @@ public class CsvExporter
         ExportToCsv(items, filePath);
     }
 
+    /// <summary>
+    /// Exports document comparison results to a CSV file.
+    /// </summary>
+    public void ExportDocumentCompareReport(DocumentCompareResult result, string filePath)
+    {
+        var items = result.GetAllDocumentComparisons().Select(d => ToDocumentCompareExportItem(d)).ToList();
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports a collection of document compare items to a CSV file.
+    /// </summary>
+    public void ExportDocumentCompareItems(IEnumerable<DocumentCompareItem> items, string filePath)
+    {
+        var exportItems = items.Select(d => ToDocumentCompareExportItem(d)).ToList();
+        ExportToCsv(exportItems, filePath);
+    }
+
+    /// <summary>
+    /// Exports a single site's document comparison results to a CSV file.
+    /// </summary>
+    public void ExportSiteDocumentCompareReport(SiteDocumentCompareResult siteResult, string filePath)
+    {
+        var items = siteResult.DocumentComparisons.Select(d => ToDocumentCompareExportItem(d)).ToList();
+        ExportToCsv(items, filePath);
+    }
+
+    private static DocumentCompareExportItem ToDocumentCompareExportItem(DocumentCompareItem d)
+    {
+        var item = new DocumentCompareExportItem
+        {
+            SourceSiteUrl = d.SourceSiteUrl,
+            TargetSiteUrl = d.TargetSiteUrl,
+            LibraryName = d.LibraryName,
+            ItemType = d.ItemType.ToString(),
+            FileName = d.FileName,
+            FileExtension = d.FileExtension,
+            SourceItemId = d.SourceItemId,
+            TargetItemId = d.TargetItemId,
+            SourceSizeBytes = d.SourceSizeBytes,
+            TargetSizeBytes = d.TargetSizeBytes,
+            SizeDifferencePercent = $"{d.SizeDifferencePercent:F1}%",
+            SourceVersionCount = d.SourceVersionCount,
+            TargetVersionCount = d.TargetVersionCount,
+            SourceAbsolutePath = d.SourceAbsolutePath,
+            TargetAbsolutePath = d.TargetAbsolutePath,
+            SourceCreated = d.SourceCreated,
+            SourceModified = d.SourceModified,
+            TargetCreated = d.TargetCreated,
+            TargetModified = d.TargetModified,
+            Status = d.StatusDescription
+        };
+
+        var notes = new List<string>();
+
+        // For SourceOnly items, check if the expected target URL would exceed 400 characters
+        if (d.Status == DocumentCompareStatus.SourceOnly &&
+            !string.IsNullOrEmpty(d.SourceAbsolutePath) &&
+            !string.IsNullOrEmpty(d.SourceSiteUrl) &&
+            !string.IsNullOrEmpty(d.TargetSiteUrl))
+        {
+            // Expected target path = target site URL + the path portion after source site URL
+            var sourceRelative = d.SourceAbsolutePath.Length > d.SourceSiteUrl.Length
+                ? d.SourceAbsolutePath[d.SourceSiteUrl.Length..]
+                : "";
+            var expectedTargetUrl = d.TargetSiteUrl.TrimEnd('/') + sourceRelative;
+            if (expectedTargetUrl.Length > 400)
+            {
+                notes.Add($"Target path would exceed 400 chars ({expectedTargetUrl.Length})");
+            }
+        }
+
+        if (d.IsNewerAtSource)
+        {
+            notes.Add("Source modified >24h after target");
+        }
+
+        item.Note = string.Join("; ", notes);
+
+        return item;
+    }
+
+    /// <summary>
+    /// Exports site access check results to a CSV file.
+    /// </summary>
+    public void ExportSiteAccessReport(SiteAccessResult result, string filePath, bool sourceOnly = false, bool targetOnly = false, bool issuesOnly = false)
+    {
+        var items = new List<SiteAccessExportItem>();
+
+        foreach (var pair in result.PairResults)
+        {
+            // Add source site
+            if (!targetOnly && (!issuesOnly || pair.SourceResult.HasIssue))
+            {
+                items.Add(new SiteAccessExportItem
+                {
+                    SiteUrl = pair.SourceResult.SiteUrl,
+                    SiteTitle = pair.SourceResult.SiteTitle,
+                    Side = "Source",
+                    Status = pair.SourceResult.StatusDescription,
+                    AccountUsed = pair.SourceResult.AccountUsed ?? "",
+                    ErrorMessage = pair.SourceResult.ErrorMessage ?? ""
+                });
+            }
+
+            // Add target site
+            if (!sourceOnly && (!issuesOnly || pair.TargetResult.HasIssue))
+            {
+                items.Add(new SiteAccessExportItem
+                {
+                    SiteUrl = pair.TargetResult.SiteUrl,
+                    SiteTitle = pair.TargetResult.SiteTitle,
+                    Side = "Target",
+                    Status = pair.TargetResult.StatusDescription,
+                    AccountUsed = pair.TargetResult.AccountUsed ?? "",
+                    ErrorMessage = pair.TargetResult.ErrorMessage ?? ""
+                });
+            }
+        }
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports only sites with access issues to a CSV file.
+    /// </summary>
+    public void ExportSiteAccessIssues(SiteAccessResult result, string filePath, bool sourceIssuesOnly = false, bool targetIssuesOnly = false)
+    {
+        var items = new List<SiteAccessExportItem>();
+
+        foreach (var pair in result.PairResults)
+        {
+            // Add source issues
+            if (!targetIssuesOnly && pair.SourceResult.HasIssue)
+            {
+                items.Add(new SiteAccessExportItem
+                {
+                    SiteUrl = pair.SourceResult.SiteUrl,
+                    SiteTitle = pair.SourceResult.SiteTitle,
+                    Side = "Source",
+                    Status = pair.SourceResult.StatusDescription,
+                    AccountUsed = pair.SourceResult.AccountUsed ?? "",
+                    ErrorMessage = pair.SourceResult.ErrorMessage ?? ""
+                });
+            }
+
+            // Add target issues
+            if (!sourceIssuesOnly && pair.TargetResult.HasIssue)
+            {
+                items.Add(new SiteAccessExportItem
+                {
+                    SiteUrl = pair.TargetResult.SiteUrl,
+                    SiteTitle = pair.TargetResult.SiteTitle,
+                    Side = "Target",
+                    Status = pair.TargetResult.StatusDescription,
+                    AccountUsed = pair.TargetResult.AccountUsed ?? "",
+                    ErrorMessage = pair.TargetResult.ErrorMessage ?? ""
+                });
+            }
+        }
+
+        ExportToCsv(items, filePath);
+    }
+
     private static string FormatSize(long bytes)
     {
         string[] sizes = ["B", "KB", "MB", "GB", "TB"];

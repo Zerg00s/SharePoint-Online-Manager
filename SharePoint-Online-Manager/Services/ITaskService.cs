@@ -149,6 +149,60 @@ public interface ITaskService
     /// Saves a navigation settings result.
     /// </summary>
     Task SaveNavigationSettingsResultAsync(NavigationSettingsResult result);
+
+    /// <summary>
+    /// Executes a document compare task and returns the results.
+    /// </summary>
+    /// <param name="continueFromPrevious">If true, skips site pairs that were successfully completed in the previous run.</param>
+    /// <param name="reauthCallback">Optional callback invoked on auth failure. Takes (tenantName, tenantDomain), returns fresh cookies or null if dismissed.</param>
+    Task<DocumentCompareResult> ExecuteDocumentCompareAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IConnectionManager connectionManager,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default,
+        bool continueFromPrevious = false,
+        Func<string, string, Task<AuthCookies?>>? reauthCallback = null);
+
+    /// <summary>
+    /// Gets all document compare results for a task.
+    /// </summary>
+    Task<List<DocumentCompareResult>> GetDocumentCompareResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent document compare result for a task.
+    /// </summary>
+    Task<DocumentCompareResult?> GetLatestDocumentCompareResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a document compare result.
+    /// </summary>
+    Task SaveDocumentCompareResultAsync(DocumentCompareResult result);
+
+    /// <summary>
+    /// Executes a site access check task and returns the results.
+    /// </summary>
+    Task<SiteAccessResult> ExecuteSiteAccessCheckAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IConnectionManager connectionManager,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all site access check results for a task.
+    /// </summary>
+    Task<List<SiteAccessResult>> GetSiteAccessResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent site access check result for a task.
+    /// </summary>
+    Task<SiteAccessResult?> GetLatestSiteAccessResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a site access check result.
+    /// </summary>
+    Task SaveSiteAccessResultAsync(SiteAccessResult result);
 }
 
 /// <summary>
@@ -161,4 +215,14 @@ public class TaskProgress
     public string CurrentSiteUrl { get; init; } = string.Empty;
     public string Message { get; init; } = string.Empty;
     public int PercentComplete => TotalSites > 0 ? (CurrentSite * 100) / TotalSites : 0;
+
+    /// <summary>
+    /// Optional: Completed site result for real-time UI updates (Document Compare).
+    /// </summary>
+    public SiteDocumentCompareResult? CompletedSiteResult { get; init; }
+
+    /// <summary>
+    /// Optional: Completed site pair access result for real-time UI updates (Site Access Check).
+    /// </summary>
+    public SitePairAccessResult? CompletedAccessPairResult { get; init; }
 }

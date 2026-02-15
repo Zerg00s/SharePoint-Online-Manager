@@ -1,3 +1,4 @@
+using System.IO;
 using SharePointOnlineManager.Models;
 using SharePointOnlineManager.Navigation;
 using SharePointOnlineManager.Services;
@@ -105,6 +106,7 @@ public class TaskListScreen : BaseScreen
         _tasksListView.Columns.Add("Type", 120);
         _tasksListView.Columns.Add("Sites", 80);
         _tasksListView.Columns.Add("Status", 100);
+        _tasksListView.Columns.Add("Results", 100);
         _tasksListView.Columns.Add("Last Run", 150);
         _tasksListView.Columns.Add("Connection", 150);
 
@@ -176,6 +178,11 @@ public class TaskListScreen : BaseScreen
                 item.SubItems.Add(task.TypeDescription);
                 item.SubItems.Add(task.TotalSites.ToString());
                 item.SubItems.Add(task.StatusDescription);
+
+                // Get result summary for applicable task types
+                var resultSummary = await GetTaskResultSummaryAsync(task);
+                item.SubItems.Add(resultSummary);
+
                 item.SubItems.Add(task.LastRunAt?.ToString("g") ?? "Never");
                 item.SubItems.Add(connectionName);
 
@@ -201,6 +208,111 @@ public class TaskListScreen : BaseScreen
         }
     }
 
+    private async Task<string> GetTaskResultSummaryAsync(TaskDefinition task)
+    {
+        try
+        {
+            // Use lightweight header-only reading to avoid loading huge result files
+            var resultsFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "SharePointOnlineManager", "results");
+
+            string? prefix = task.Type switch
+            {
+                TaskType.DocumentCompare => "doccompare_",
+                TaskType.SiteAccessCheck => "siteaccess_",
+                TaskType.ListCompare => null, // Uses task ID directly
+                TaskType.DocumentReport => "docreport_",
+                TaskType.NavigationSettingsSync => "navsettings_",
+                _ => null
+            };
+
+            if (prefix == null && task.Type != TaskType.ListCompare)
+                return "-";
+
+            // Find the latest result file for this task
+            var pattern = prefix != null ? $"{prefix}{task.Id}_*.json" : $"{task.Id}_*.json";
+            var resultFiles = Directory.GetFiles(resultsFolder, pattern)
+                .OrderByDescending(f => f)
+                .ToList();
+
+            if (resultFiles.Count == 0)
+                return "-";
+
+            var latestFile = resultFiles[0];
+
+            // Read only first 1KB to get summary fields (they're at the top of the JSON)
+            using var stream = new FileStream(latestFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var buffer = new byte[1024];
+            var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+            var headerJson = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+            // Extract summary fields using simple string parsing (faster than JSON parsing)
+            return task.Type switch
+            {
+                TaskType.DocumentCompare => ExtractPairSummary(headerJson, "successfulPairs", "totalPairsProcessed"),
+                TaskType.SiteAccessCheck => ExtractAccessSummary(headerJson),
+                TaskType.ListCompare => ExtractPairSummary(headerJson, "successfulPairs", "totalPairsProcessed"),
+                TaskType.DocumentReport => ExtractPairSummary(headerJson, "successfulSites", "totalSitesProcessed"),
+                TaskType.NavigationSettingsSync => ExtractPairSummary(headerJson, "matchingPairs", "totalPairsProcessed"),
+                _ => "-"
+            };
+        }
+        catch
+        {
+            // Ignore errors loading results
+        }
+
+        return "-";
+    }
+
+    private static string ExtractPairSummary(string json, string successField, string totalField)
+    {
+        var success = ExtractIntValue(json, successField);
+        var total = ExtractIntValue(json, totalField);
+        if (success.HasValue && total.HasValue)
+        {
+            return $"{success}/{total}";
+        }
+        return "-";
+    }
+
+    private static string ExtractAccessSummary(string json)
+    {
+        var srcDenied = ExtractIntValue(json, "sourceAccessDeniedCount") ?? 0;
+        var tgtDenied = ExtractIntValue(json, "targetAccessDeniedCount") ?? 0;
+        var issues = srcDenied + tgtDenied;
+        return issues > 0 ? $"{issues} issues" : "OK";
+    }
+
+    private static int? ExtractIntValue(string json, string fieldName)
+    {
+        // Look for "fieldName": 123 pattern (case-insensitive)
+        var patterns = new[] { $"\"{fieldName}\":", $"\"{fieldName}\" :" };
+        foreach (var pattern in patterns)
+        {
+            var idx = json.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+            {
+                var valueStart = idx + pattern.Length;
+                // Skip whitespace
+                while (valueStart < json.Length && char.IsWhiteSpace(json[valueStart]))
+                    valueStart++;
+
+                // Extract number
+                var valueEnd = valueStart;
+                while (valueEnd < json.Length && (char.IsDigit(json[valueEnd]) || json[valueEnd] == '-'))
+                    valueEnd++;
+
+                if (valueEnd > valueStart && int.TryParse(json[valueStart..valueEnd], out var value))
+                {
+                    return value;
+                }
+            }
+        }
+        return null;
+    }
+
     private void TasksListView_SelectedIndexChanged(object? sender, EventArgs e)
     {
         UpdateButtonStates();
@@ -212,9 +324,8 @@ public class TaskListScreen : BaseScreen
         _viewButton.Enabled = hasSelection;
         _deleteButton.Enabled = hasSelection;
 
-        if (hasSelection)
+        if (hasSelection && _tasksListView.SelectedItems[0].Tag is TaskDefinition task)
         {
-            var task = (TaskDefinition)_tasksListView.SelectedItems[0].Tag;
             _runButton.Enabled = task.Status != Models.TaskStatus.Running;
         }
         else
@@ -269,6 +380,14 @@ public class TaskListScreen : BaseScreen
         {
             await NavigationService!.NavigateToAsync<NavigationSettingsDetailScreen>(task);
         }
+        else if (task.Type == TaskType.DocumentCompare)
+        {
+            await NavigationService!.NavigateToAsync<DocumentCompareDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.SiteAccessCheck)
+        {
+            await NavigationService!.NavigateToAsync<SiteAccessDetailScreen>(task);
+        }
         else
         {
             await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
@@ -316,6 +435,14 @@ public class TaskListScreen : BaseScreen
         else if (task.Type == TaskType.NavigationSettingsSync)
         {
             await NavigationService!.NavigateToAsync<NavigationSettingsDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.DocumentCompare)
+        {
+            await NavigationService!.NavigateToAsync<DocumentCompareDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.SiteAccessCheck)
+        {
+            await NavigationService!.NavigateToAsync<SiteAccessDetailScreen>(execParam);
         }
         else
         {

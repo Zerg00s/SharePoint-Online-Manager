@@ -17,6 +17,27 @@ public enum ConnectionType
 }
 
 /// <summary>
+/// Defines the role of a tenant in migration scenarios.
+/// </summary>
+public enum TenantRole
+{
+    /// <summary>
+    /// Tenant role not specified.
+    /// </summary>
+    Unspecified,
+
+    /// <summary>
+    /// Source tenant - data is migrated FROM this tenant.
+    /// </summary>
+    Source,
+
+    /// <summary>
+    /// Target tenant - data is migrated TO this tenant.
+    /// </summary>
+    Target
+}
+
+/// <summary>
 /// Represents a saved SharePoint connection configuration.
 /// </summary>
 public class Connection
@@ -24,10 +45,21 @@ public class Connection
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = string.Empty;
     public ConnectionType Type { get; set; }
+    public TenantRole Role { get; set; } = TenantRole.Unspecified;
     public string TenantName { get; set; } = string.Empty;
     public string? SiteUrl { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LastConnectedAt { get; set; }
+
+    /// <summary>
+    /// Gets a display string for the tenant role.
+    /// </summary>
+    public string RoleDescription => Role switch
+    {
+        TenantRole.Source => "Source",
+        TenantRole.Target => "Target",
+        _ => ""
+    };
 
     /// <summary>
     /// Gets the admin URL for this connection's tenant.

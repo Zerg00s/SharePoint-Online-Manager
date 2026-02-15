@@ -175,6 +175,8 @@ public class TaskTypeSelectionScreen : BaseScreen
         TaskType.AddSiteCollectionAdmins => "\U0001F464", // bust in silhouette emoji (user/admin)
         TaskType.RemoveSiteCollectionAdmins => "\U0001F6AB", // no entry sign emoji (remove)
         TaskType.NavigationSettingsSync => "\U0001F517", // link emoji (navigation)
+        TaskType.DocumentCompare => "\U0001F4C4", // page emoji (documents)
+        TaskType.SiteAccessCheck => "\U0001F511", // key emoji (access)
         _ => "\U0001F4C4" // page emoji
     };
 
@@ -198,6 +200,12 @@ public class TaskTypeSelectionScreen : BaseScreen
         if (taskType == TaskType.NavigationSettingsSync)
         {
             await NavigationService!.NavigateToAsync<NavigationSettingsConfigScreen>(_context);
+            return;
+        }
+
+        if (taskType == TaskType.SiteAccessCheck)
+        {
+            await NavigationService!.NavigateToAsync<SiteAccessConfigScreen>(_context);
             return;
         }
 

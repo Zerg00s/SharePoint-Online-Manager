@@ -155,4 +155,21 @@ public interface ISharePointService : IDisposable
     /// <param name="settings">The navigation settings to apply.</param>
     /// <returns>A result indicating success or failure.</returns>
     Task<SharePointResult<bool>> SetNavigationSettingsAsync(string siteUrl, NavigationSettings settings);
+
+    /// <summary>
+    /// Gets documents from a library for comparison purposes.
+    /// Uses pagination to handle large libraries efficiently.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <param name="libraryTitle">The document library title.</param>
+    /// <param name="includeAspxPages">Whether to include ASPX pages.</param>
+    /// <param name="progress">Progress reporter for status updates.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A list of documents with IDs, paths, and sizes.</returns>
+    Task<SharePointResult<List<DocumentCompareSourceItem>>> GetDocumentsForCompareAsync(
+        string siteUrl,
+        string libraryTitle,
+        bool includeAspxPages,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken);
 }

@@ -16,7 +16,7 @@ public partial class LoginForm : Form
 
     public AuthCookies? CapturedCookies { get; private set; }
 
-    public LoginForm(string siteUrl)
+    public LoginForm(string siteUrl, string? title = null)
     {
         _siteUrl = siteUrl;
         var uri = new Uri(siteUrl);
@@ -24,6 +24,9 @@ public partial class LoginForm : Form
 
         InitializeComponent();
         InitializeWebView();
+
+        if (title != null)
+            this.Text = title;
     }
 
     private void InitializeWebView()

@@ -45,6 +45,13 @@ public class ServiceProvider : IServiceProvider
 
         var csvExporter = new CsvExporter();
         _services[typeof(CsvExporter)] = csvExporter;
+
+        var excelExporter = new ExcelExporter();
+        _services[typeof(ExcelExporter)] = excelExporter;
+
+        var tenantPairService = new TenantPairService();
+        _services[typeof(ITenantPairService)] = tenantPairService;
+        _services[typeof(TenantPairService)] = tenantPairService;
     }
 
     public object? GetService(Type serviceType)

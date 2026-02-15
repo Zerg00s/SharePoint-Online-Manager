@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -5,6 +6,56 @@ using SharePointOnlineManager.Models;
 using SharePointOnlineManager.Screens;
 
 namespace SharePointOnlineManager.Services;
+
+/// <summary>
+/// HTTP handler that logs all request/response status codes to Trace (visible in DebugView).
+/// </summary>
+internal class TraceLoggingHandler : DelegatingHandler
+{
+    public TraceLoggingHandler(HttpMessageHandler innerHandler) : base(innerHandler) { }
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var method = request.Method;
+        var url = request.RequestUri?.AbsoluteUri ?? "unknown";
+        // Truncate URL for readability (keep first 120 chars)
+        var shortUrl = url.Length > 120 ? url[..120] + "..." : url;
+
+        Trace.WriteLine($"[SPOManager] HTTP {method} {shortUrl}");
+
+        var sw = Stopwatch.StartNew();
+        var response = await base.SendAsync(request, cancellationToken);
+        sw.Stop();
+
+        var status = (int)response.StatusCode;
+        var level = status >= 400 ? "WARN" : "INFO";
+        Trace.WriteLine($"[SPOManager] HTTP {status} {response.StatusCode} ({sw.ElapsedMilliseconds}ms) {method} {shortUrl}");
+
+        if (status == 429 || status == 503)
+        {
+            var retryAfter = response.Headers.RetryAfter?.Delta?.TotalSeconds
+                          ?? response.Headers.RetryAfter?.Date?.Subtract(DateTimeOffset.UtcNow).TotalSeconds;
+            var retryInfo = retryAfter.HasValue ? $"Retry-After: {retryAfter:F0}s" : "No Retry-After header";
+            Trace.WriteLine($"[SPOManager] THROTTLED ({status}) - {retryInfo} - {shortUrl}");
+        }
+        else if (status >= 400)
+        {
+            try
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                if (!string.IsNullOrEmpty(body))
+                {
+                    var snippet = body.Length > 300 ? body[..300] + "..." : body;
+                    Trace.WriteLine($"[SPOManager] HTTP {status} Body: {snippet}");
+                }
+            }
+            catch { /* don't fail on logging */ }
+        }
+
+        return response;
+    }
+}
 
 /// <summary>
 /// SharePoint REST API service using cookie-based authentication.
@@ -30,17 +81,20 @@ public class SharePointService : ISharePointService
     {
         _domain = targetDomain;
 
-        var handler = new HttpClientHandler
+        var cookieHandler = new HttpClientHandler
         {
             CookieContainer = new CookieContainer()
         };
 
         // Add cookies for the target domain (FedAuth/rtFa work across the tenant)
         var baseUri = new Uri($"https://{targetDomain}");
-        handler.CookieContainer.Add(baseUri, new Cookie("FedAuth", cookies.FedAuth, "/", targetDomain));
-        handler.CookieContainer.Add(baseUri, new Cookie("rtFa", cookies.RtFa, "/", targetDomain));
+        cookieHandler.CookieContainer.Add(baseUri, new Cookie("FedAuth", cookies.FedAuth, "/", targetDomain));
+        cookieHandler.CookieContainer.Add(baseUri, new Cookie("rtFa", cookies.RtFa, "/", targetDomain));
 
-        _client = new HttpClient(handler)
+        // Wrap with trace logging handler for DebugView visibility
+        var tracingHandler = new TraceLoggingHandler(cookieHandler);
+
+        _client = new HttpClient(tracingHandler)
         {
             Timeout = TimeSpan.FromSeconds(60)
         };
@@ -2017,6 +2071,438 @@ public class SharePointService : ISharePointService
                 Status = SharePointResultStatus.Error,
                 ErrorMessage = ex.Message
             };
+        }
+    }
+
+    #endregion
+
+    #region Document Compare Methods
+
+    /// <summary>
+    /// Exponential backoff delay values in seconds for throttling retry.
+    /// </summary>
+    private static readonly int[] ThrottleRetryDelays = [2, 4, 8, 16, 32, 60, 120];
+
+    /// <summary>
+    /// Returns true if the status code indicates SharePoint throttling.
+    /// SharePoint Online uses 429 (Too Many Requests) and 503 (Service Unavailable) for throttling.
+    /// </summary>
+    private static bool IsThrottlingResponse(HttpStatusCode statusCode) =>
+        statusCode == (HttpStatusCode)429 || statusCode == HttpStatusCode.ServiceUnavailable;
+
+    /// <summary>
+    /// Extracts the Retry-After delay in seconds from the response headers.
+    /// SharePoint sends Retry-After as an integer (seconds).
+    /// Returns null if no valid Retry-After header is present.
+    /// </summary>
+    private static int? GetRetryAfterSeconds(HttpResponseMessage response)
+    {
+        // Try the typed Retry-After header (handles both delta and date formats)
+        if (response.Headers.RetryAfter?.Delta.HasValue == true)
+        {
+            return Math.Max(1, (int)response.Headers.RetryAfter.Delta.Value.TotalSeconds);
+        }
+        if (response.Headers.RetryAfter?.Date.HasValue == true)
+        {
+            var waitTime = response.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
+            return Math.Max(1, (int)waitTime.TotalSeconds);
+        }
+
+        // Fallback: parse raw header value as integer seconds
+        // (some SharePoint responses send it as a plain integer string)
+        if (response.Headers.TryGetValues("Retry-After", out var values))
+        {
+            var raw = values.FirstOrDefault();
+            if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out var seconds))
+            {
+                return Math.Max(1, seconds);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Executes an HTTP request with automatic retry for throttling (429/503) responses.
+    /// Honors the Retry-After header when present, falls back to exponential backoff.
+    /// </summary>
+    private async Task<HttpResponseMessage> ExecuteWithThrottlingRetryAsync(
+        Func<Task<HttpResponseMessage>> requestFunc,
+        CancellationToken cancellationToken)
+    {
+        int retryCount = 0;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var response = await requestFunc();
+
+            if (!IsThrottlingResponse(response.StatusCode))
+            {
+                return response;
+            }
+
+            if (retryCount >= ThrottleRetryDelays.Length)
+            {
+                // Max retries reached, return the throttled response
+                return response;
+            }
+
+            // Honor Retry-After header if present, otherwise use exponential backoff
+            var retryAfterSeconds = GetRetryAfterSeconds(response) ?? ThrottleRetryDelays[retryCount];
+
+            Trace.WriteLine($"[SPOManager] Throttled ({(int)response.StatusCode}) - Retry {retryCount + 1}/{ThrottleRetryDelays.Length}, waiting {retryAfterSeconds}s");
+
+            await Task.Delay(TimeSpan.FromSeconds(retryAfterSeconds), cancellationToken);
+            retryCount++;
+        }
+    }
+
+    public async Task<SharePointResult<List<DocumentCompareSourceItem>>> GetDocumentsForCompareAsync(
+        string siteUrl,
+        string libraryTitle,
+        bool includeAspxPages,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var documents = new List<DocumentCompareSourceItem>();
+        var baseUrl = siteUrl.TrimEnd('/');
+        var encodedLibraryTitle = Uri.EscapeDataString(libraryTitle);
+
+        try
+        {
+            // Query both files (FSObjType=0) and folders (FSObjType=1)
+            // ASPX filtering is done during parsing if needed
+            var viewXml = @"<View Scope='RecursiveAll'>
+                <ViewFields>
+                    <FieldRef Name='ID'/>
+                    <FieldRef Name='FileLeafRef'/>
+                    <FieldRef Name='FileRef'/>
+                    <FieldRef Name='File_x0020_Size'/>
+                    <FieldRef Name='_UIVersionString'/>
+                    <FieldRef Name='FSObjType'/>
+                    <FieldRef Name='Created'/>
+                    <FieldRef Name='Modified'/>
+                </ViewFields>
+                <RowLimit Paged='TRUE'>5000</RowLimit>
+            </View>";
+
+            string? pagingInfo = null;
+            int pageCount = 0;
+            var baseApiUrl = $"{baseUrl}/_api/web/lists/GetByTitle('{encodedLibraryTitle}')/RenderListDataAsStream";
+
+            do
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                pageCount++;
+
+                var fetchedSoFar = documents.Count > 0 ? $" ({documents.Count:N0} fetched)" : "";
+                progress?.Report($"Fetching page {pageCount} from {libraryTitle}{fetchedSoFar}...");
+
+                var apiUrl = baseApiUrl;
+                if (!string.IsNullOrEmpty(pagingInfo))
+                {
+                    apiUrl = baseApiUrl + pagingInfo;
+                }
+
+                var requestBody = new StringContent(
+                    $"{{\"parameters\":{{\"RenderOptions\":2,\"ViewXml\":\"{viewXml.Replace("\"", "\\\"").Replace("\n", "").Replace("\r", "")}\"}}}}",
+                    System.Text.Encoding.UTF8,
+                    "application/json");
+
+                var response = await ExecuteWithThrottlingRetryAsync(
+                    () => _client.PostAsync(apiUrl, requestBody),
+                    cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    return new SharePointResult<List<DocumentCompareSourceItem>>
+                    {
+                        Data = documents,
+                        Status = GetSharePointStatus(response.StatusCode),
+                        ErrorMessage = $"Page {pageCount}: HTTP {(int)response.StatusCode} - {errorContent.Substring(0, Math.Min(200, errorContent.Length))}"
+                    };
+                }
+
+                var json = await response.Content.ReadAsStringAsync();
+                var (items, nextPaging) = ParseDocumentsForCompare(json, libraryTitle, includeAspxPages, siteUrl);
+                documents.AddRange(items);
+                pagingInfo = nextPaging;
+
+            } while (!string.IsNullOrEmpty(pagingInfo));
+
+            return new SharePointResult<List<DocumentCompareSourceItem>>
+            {
+                Data = documents,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            return new SharePointResult<List<DocumentCompareSourceItem>>
+            {
+                Data = documents,
+                Status = ex.StatusCode switch
+                {
+                    HttpStatusCode.Unauthorized => SharePointResultStatus.AuthenticationRequired,
+                    HttpStatusCode.Forbidden => SharePointResultStatus.AccessDenied,
+                    HttpStatusCode.NotFound => SharePointResultStatus.NotFound,
+                    _ => SharePointResultStatus.Error
+                },
+                ErrorMessage = $"{ex.Message}; Collected {documents.Count} docs before error"
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<List<DocumentCompareSourceItem>>
+            {
+                Data = documents,
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = $"{ex.Message}; Collected {documents.Count} docs before error"
+            };
+        }
+    }
+
+    private static (List<DocumentCompareSourceItem> items, string? nextHref) ParseDocumentsForCompare(
+        string json,
+        string libraryTitle,
+        bool includeAspxPages,
+        string siteUrl)
+    {
+        var items = new List<DocumentCompareSourceItem>();
+        string? nextHref = null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // Get paging info
+            if (root.TryGetProperty("NextHref", out var nextHrefElement) &&
+                nextHrefElement.ValueKind == JsonValueKind.String)
+            {
+                nextHref = nextHrefElement.GetString();
+            }
+
+            // Get rows
+            if (!root.TryGetProperty("Row", out var rowsElement))
+            {
+                return (items, nextHref);
+            }
+
+            foreach (var row in rowsElement.EnumerateArray())
+            {
+                var fileName = GetStringProperty(row, "FileLeafRef");
+                var fileRef = GetStringProperty(row, "FileRef");
+
+                if (string.IsNullOrEmpty(fileName) || string.IsNullOrEmpty(fileRef))
+                    continue;
+
+                // Parse FSObjType: 0 = File, 1 = Folder
+                var itemType = DocumentCompareItemType.File;
+                var fsObjTypeStr = GetStringProperty(row, "FSObjType");
+                if (fsObjTypeStr == "1")
+                {
+                    itemType = DocumentCompareItemType.Folder;
+                }
+
+                // Skip ASPX files if not including them (folders are always included)
+                if (itemType == DocumentCompareItemType.File && !includeAspxPages)
+                {
+                    if (fileName.EndsWith(".aspx", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                }
+
+                // Parse ID
+                int id = 0;
+                if (row.TryGetProperty("ID", out var idProp))
+                {
+                    if (idProp.ValueKind == JsonValueKind.Number)
+                    {
+                        id = idProp.GetInt32();
+                    }
+                    else if (idProp.ValueKind == JsonValueKind.String)
+                    {
+                        int.TryParse(idProp.GetString(), out id);
+                    }
+                }
+
+                // Parse file size (folders will have 0)
+                long fileSize = 0;
+                var fileSizeStr = GetStringProperty(row, "File_x0020_Size");
+                if (!string.IsNullOrEmpty(fileSizeStr))
+                {
+                    var cleanSize = fileSizeStr.Replace(",", "").Replace(" ", "");
+                    long.TryParse(cleanSize, out fileSize);
+                }
+
+                // Parse version (folders typically have version 1)
+                var versionStr = GetStringProperty(row, "_UIVersionString");
+                int versionCount = 1;
+                if (!string.IsNullOrEmpty(versionStr))
+                {
+                    var dotIndex = versionStr.IndexOf('.');
+                    if (dotIndex > 0 && int.TryParse(versionStr.Substring(0, dotIndex), out var major))
+                    {
+                        versionCount = major;
+                    }
+                }
+
+                // Parse Created and Modified dates
+                // RenderListDataAsStream may return these with a period suffix (e.g., "Created." not "Created")
+                DateTime? created = null;
+                DateTime? modified = null;
+                var createdStr = GetStringProperty(row, "Created.");
+                if (string.IsNullOrEmpty(createdStr))
+                    createdStr = GetStringProperty(row, "Created");
+                var modifiedStr = GetStringProperty(row, "Modified.");
+                if (string.IsNullOrEmpty(modifiedStr))
+                    modifiedStr = GetStringProperty(row, "Modified");
+                if (!string.IsNullOrEmpty(createdStr) && DateTime.TryParse(createdStr, out var createdDt))
+                {
+                    created = createdDt;
+                }
+                if (!string.IsNullOrEmpty(modifiedStr) && DateTime.TryParse(modifiedStr, out var modifiedDt))
+                {
+                    modified = modifiedDt;
+                }
+
+                // Build relative path (case-insensitive matching key)
+                // Extract the path after the library name for comparison
+                var relativePath = ExtractRelativePathForCompare(fileRef, libraryTitle, siteUrl);
+
+                items.Add(new DocumentCompareSourceItem
+                {
+                    Id = id,
+                    FileName = fileName,
+                    ServerRelativeUrl = fileRef,
+                    RelativePath = relativePath,
+                    SizeBytes = fileSize,
+                    VersionCount = versionCount,
+                    LibraryTitle = libraryTitle,
+                    ItemType = itemType,
+                    Created = created,
+                    Modified = modified
+                });
+            }
+        }
+        catch
+        {
+            // Return what we have
+        }
+
+        return (items, nextHref);
+    }
+
+    /// <summary>
+    /// Re-computes RelativePath for cached documents using current extraction logic.
+    /// This ensures cached data stays correct even if the path extraction algorithm changes.
+    /// </summary>
+    public static void RecomputeRelativePaths(List<DocumentCompareSourceItem> documents, string libraryTitle, string siteUrl)
+    {
+        foreach (var doc in documents)
+        {
+            doc.RelativePath = ExtractRelativePathForCompare(doc.ServerRelativeUrl, libraryTitle, siteUrl);
+        }
+    }
+
+    private static string ExtractRelativePathForCompare(string serverRelativeUrl, string libraryTitle, string siteUrl)
+    {
+        // ServerRelativeUrl format: /sites/sitename/libraryurl/folder1/folder2/filename.ext
+        // Or for root sites: /libraryurl/folder1/folder2/filename.ext
+        // We want to extract: folder1/folder2/filename.ext (normalized for comparison)
+        // NOTE: Do NOT URL-decode the path. RenderListDataAsStream returns raw field values,
+        // and filenames may contain literal %XX sequences (e.g., "file%2E1.pdf") that would
+        // be incorrectly decoded to dots/spaces.
+        try
+        {
+            var lowerUrl = serverRelativeUrl.ToLowerInvariant();
+
+            // Strategy 1: Use the site URL to strip the site prefix, then skip the library URL segment.
+            // This works even when the library display title differs from the URL name
+            // (e.g., "S&T" display title but "ST" URL name, or "UOHI Polices" title but "Polices" URL)
+            var siteServerRelativePath = GetServerRelativePath(siteUrl);
+            if (!string.IsNullOrEmpty(siteServerRelativePath))
+            {
+                var lowerSitePath = siteServerRelativePath.ToLowerInvariant().TrimEnd('/') + "/";
+                if (lowerUrl.StartsWith(lowerSitePath))
+                {
+                    // After stripping site path, we have: libraryurl/folder1/folder2/file.ext
+                    var afterSite = serverRelativeUrl.Substring(lowerSitePath.Length);
+                    var firstSlash = afterSite.IndexOf('/');
+                    if (firstSlash >= 0 && firstSlash < afterSite.Length - 1)
+                    {
+                        // Everything after libraryurl/ is the content path
+                        return afterSite.Substring(firstSlash + 1).ToLowerInvariant();
+                    }
+                    // File is directly in the library root
+                    return string.Empty;
+                }
+            }
+
+            // Strategy 2: Try matching library title variations in the URL
+            // Handles cases where site URL extraction didn't work
+            var candidates = new List<string>
+            {
+                libraryTitle.ToLowerInvariant() + "/"
+            };
+
+            // Also try without spaces (e.g., "Site Assets" → "SiteAssets")
+            var noSpaces = libraryTitle.Replace(" ", "").ToLowerInvariant() + "/";
+            if (noSpaces != candidates[0])
+            {
+                candidates.Add(noSpaces);
+            }
+
+            foreach (var candidate in candidates)
+            {
+                var libraryIndex = lowerUrl.LastIndexOf(candidate, StringComparison.OrdinalIgnoreCase);
+                if (libraryIndex >= 0)
+                {
+                    if (libraryIndex == 0 || serverRelativeUrl[libraryIndex - 1] == '/' || serverRelativeUrl[libraryIndex - 1] == ' ')
+                    {
+                        var pathStart = libraryIndex + candidate.Length;
+                        if (pathStart < serverRelativeUrl.Length)
+                        {
+                            return serverRelativeUrl.Substring(pathStart).ToLowerInvariant();
+                        }
+                        return string.Empty;
+                    }
+                }
+            }
+
+            // Last resort: return the full path
+            return lowerUrl;
+        }
+        catch
+        {
+            return serverRelativeUrl.ToLowerInvariant();
+        }
+    }
+
+    /// <summary>
+    /// Extracts the server-relative path from a full site URL.
+    /// e.g., "https://tenant.sharepoint.com/sites/MySite" → "/sites/MySite"
+    /// e.g., "https://tenant.sharepoint.com/" → "/"
+    /// </summary>
+    private static string GetServerRelativePath(string siteUrl)
+    {
+        try
+        {
+            var uri = new Uri(siteUrl.TrimEnd('/'));
+            return uri.AbsolutePath;
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 

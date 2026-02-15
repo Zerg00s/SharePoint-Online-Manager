@@ -43,7 +43,17 @@ public enum TaskType
     /// <summary>
     /// Compare and sync navigation settings (HorizontalQuickLaunch, MegaMenuEnabled) between source and target sites.
     /// </summary>
-    NavigationSettingsSync
+    NavigationSettingsSync,
+
+    /// <summary>
+    /// Compare documents between source and target sites to identify missing or mismatched files.
+    /// </summary>
+    DocumentCompare,
+
+    /// <summary>
+    /// Check site access for source and target accounts to identify permission issues.
+    /// </summary>
+    SiteAccessCheck
 }
 
 /// <summary>
@@ -89,6 +99,8 @@ public class TaskDefinition
         TaskType.AddSiteCollectionAdmins => "Add Site Admins",
         TaskType.RemoveSiteCollectionAdmins => "Remove Site Admins",
         TaskType.NavigationSettingsSync => "Navigation Settings",
+        TaskType.DocumentCompare => "Document Compare",
+        TaskType.SiteAccessCheck => "Site Access Check",
         _ => Type.ToString()
     };
 
@@ -124,6 +136,8 @@ public static class TaskTypeExtensions
         TaskType.AddSiteCollectionAdmins => "Add up to 5 site collection administrators",
         TaskType.RemoveSiteCollectionAdmins => "Remove up to 5 site collection administrators",
         TaskType.NavigationSettingsSync => "Compare and sync navigation settings between tenants",
+        TaskType.DocumentCompare => "Compare documents between source and target sites",
+        TaskType.SiteAccessCheck => "Check site access for source and target accounts",
         _ => type.ToString()
     };
 
@@ -140,6 +154,8 @@ public static class TaskTypeExtensions
         TaskType.AddSiteCollectionAdmins => "Add Site Collection Administrators",
         TaskType.RemoveSiteCollectionAdmins => "Remove Site Collection Administrators",
         TaskType.NavigationSettingsSync => "Navigation Settings Sync",
+        TaskType.DocumentCompare => "Document Compare",
+        TaskType.SiteAccessCheck => "Site Access Check",
         _ => type.ToString()
     };
 
@@ -150,6 +166,8 @@ public static class TaskTypeExtensions
     {
         TaskType.ListCompare => true,
         TaskType.NavigationSettingsSync => true,
+        TaskType.DocumentCompare => true,
+        TaskType.SiteAccessCheck => true,
         _ => false
     };
 }

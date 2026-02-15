@@ -28,6 +28,7 @@ public class ListCompareConfigScreen : BaseScreen
     private IConnectionManager _connectionManager = null!;
     private IAuthenticationService _authService = null!;
     private ITaskService _taskService = null!;
+    private ITenantPairService _tenantPairService = null!;
     private List<Connection> _connections = [];
     private List<SiteComparePair> _sitePairs = [];
 
@@ -38,6 +39,7 @@ public class ListCompareConfigScreen : BaseScreen
         _connectionManager = GetRequiredService<IConnectionManager>();
         _authService = GetRequiredService<IAuthenticationService>();
         _taskService = GetRequiredService<ITaskService>();
+        _tenantPairService = GetRequiredService<ITenantPairService>();
         InitializeUI();
     }
 
@@ -323,6 +325,7 @@ public class ListCompareConfigScreen : BaseScreen
         try
         {
             _connections = await _connectionManager.GetAllConnectionsAsync();
+            var tenantPairs = await _tenantPairService.GetAllPairsAsync();
 
             _sourceConnectionCombo.Items.Clear();
             _targetConnectionCombo.Items.Clear();
@@ -336,15 +339,33 @@ public class ListCompareConfigScreen : BaseScreen
 
             if (_connections.Count > 0)
             {
-                _sourceConnectionCombo.SelectedIndex = 0;
-                if (_connections.Count > 1)
+                int sourceIndex = -1;
+                int targetIndex = -1;
+
+                // First, try to use the first tenant pair
+                if (tenantPairs.Count > 0)
                 {
-                    _targetConnectionCombo.SelectedIndex = 1;
+                    var firstPair = tenantPairs[0];
+                    sourceIndex = _connections.FindIndex(c => c.Id == firstPair.SourceConnectionId);
+                    targetIndex = _connections.FindIndex(c => c.Id == firstPair.TargetConnectionId);
                 }
-                else
+
+                // If no tenant pair, try to use connection roles
+                if (sourceIndex < 0)
                 {
-                    _targetConnectionCombo.SelectedIndex = 0;
+                    sourceIndex = _connections.FindIndex(c => c.Role == TenantRole.Source);
                 }
+                if (targetIndex < 0)
+                {
+                    targetIndex = _connections.FindIndex(c => c.Role == TenantRole.Target);
+                }
+
+                // Fall back to first/second connection
+                if (sourceIndex < 0) sourceIndex = 0;
+                if (targetIndex < 0) targetIndex = _connections.Count > 1 ? 1 : 0;
+
+                _sourceConnectionCombo.SelectedIndex = sourceIndex;
+                _targetConnectionCombo.SelectedIndex = targetIndex;
             }
 
             SetStatus($"Loaded {_connections.Count} connections");
@@ -412,23 +433,17 @@ public class ListCompareConfigScreen : BaseScreen
                 var sourceUrl = parts[0].Trim().Trim('"');
                 var targetUrl = parts[1].Trim().Trim('"');
 
-                // Skip header row
-                if (sourceUrl.Equals("Source URL", StringComparison.OrdinalIgnoreCase) ||
-                    sourceUrl.Equals("SourceUrl", StringComparison.OrdinalIgnoreCase) ||
-                    sourceUrl.Equals("Source", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
                 // Validate URLs
                 if (!Uri.TryCreate(sourceUrl, UriKind.Absolute, out _))
                 {
+                    if (lineNumber == 1) continue; // Skip header row
                     errors.Add($"Line {lineNumber}: Invalid source URL '{sourceUrl}'");
                     continue;
                 }
 
                 if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out _))
                 {
+                    if (lineNumber == 1) continue; // Skip header row
                     errors.Add($"Line {lineNumber}: Invalid target URL '{targetUrl}'");
                     continue;
                 }

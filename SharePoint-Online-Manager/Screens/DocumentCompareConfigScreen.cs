@@ -8,19 +8,22 @@ using SharePointOnlineManager.Services;
 namespace SharePointOnlineManager.Screens;
 
 /// <summary>
-/// Screen for configuring a new Navigation Settings Sync task.
+/// Screen for configuring a new Document Compare task.
 /// </summary>
-public class NavigationSettingsConfigScreen : BaseScreen
+public class DocumentCompareConfigScreen : BaseScreen
 {
     private ComboBox _sourceConnectionCombo = null!;
     private ComboBox _targetConnectionCombo = null!;
     private Button _importCsvButton = null!;
-    private Button _generateTargetUrlsButton = null!;
     private DataGridView _sitePairsGrid = null!;
+    private CheckedListBox _exclusionsListBox = null!;
+    private CheckBox _includeHiddenLibrariesCheckBox = null!;
+    private CheckBox _includeAspxPagesCheckBox = null!;
+    private CheckBox _useShareGateNormalizationCheckBox = null!;
+    private CheckBox _useCacheCheckBox = null!;
     private TextBox _taskNameTextBox = null!;
     private Button _createTaskButton = null!;
     private Button _clearPairsButton = null!;
-    private Label _selectedSitesLabel = null!;
 
     private IConnectionManager _connectionManager = null!;
     private IAuthenticationService _authService = null!;
@@ -28,10 +31,8 @@ public class NavigationSettingsConfigScreen : BaseScreen
     private ITenantPairService _tenantPairService = null!;
     private List<Connection> _connections = [];
     private List<SiteComparePair> _sitePairs = [];
-    private TaskCreationContext? _context;
-    private List<string> _selectedSourceUrls = [];
 
-    public override string ScreenTitle => "Create Navigation Settings Sync Task";
+    public override string ScreenTitle => "Create Document Compare Task";
 
     protected override void OnInitialize()
     {
@@ -57,9 +58,9 @@ public class NavigationSettingsConfigScreen : BaseScreen
         mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
         mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
         mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 70)); // Connections row
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); // Selected sites info row
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); // Buttons row
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // Site pairs grid
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); // Import button row
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 40)); // Site pairs grid
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 30)); // Exclusions
         mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 60)); // Task name
         mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); // Create button
 
@@ -69,42 +70,13 @@ public class NavigationSettingsConfigScreen : BaseScreen
         mainPanel.Controls.Add(sourceConnPanel, 0, 0);
         mainPanel.Controls.Add(targetConnPanel, 1, 0);
 
-        // Row 1: Selected sites info
-        var selectedSitesPanel = new FlowLayoutPanel
+        // Row 1: Import CSV button
+        var importPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             Padding = new Padding(0, 5, 0, 5)
         };
-
-        _selectedSitesLabel = new Label
-        {
-            Text = "No sites selected from Site Collections screen",
-            AutoSize = true,
-            ForeColor = SystemColors.GrayText,
-            Padding = new Padding(0, 8, 0, 0)
-        };
-
-        selectedSitesPanel.Controls.Add(_selectedSitesLabel);
-        mainPanel.Controls.Add(selectedSitesPanel, 0, 1);
-        mainPanel.SetColumnSpan(selectedSitesPanel, 2);
-
-        // Row 2: Buttons row
-        var buttonsPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(0, 5, 0, 5)
-        };
-
-        _generateTargetUrlsButton = new Button
-        {
-            Text = "Generate Target URLs",
-            Size = new Size(150, 28),
-            Margin = new Padding(0, 0, 10, 0),
-            Enabled = false
-        };
-        _generateTargetUrlsButton.Click += GenerateTargetUrlsButton_Click;
 
         _importCsvButton = new Button
         {
@@ -130,15 +102,15 @@ public class NavigationSettingsConfigScreen : BaseScreen
             Padding = new Padding(10, 8, 0, 0)
         };
 
-        buttonsPanel.Controls.AddRange(new Control[] { _generateTargetUrlsButton, _importCsvButton, _clearPairsButton, csvInfoLabel });
-        mainPanel.Controls.Add(buttonsPanel, 0, 2);
-        mainPanel.SetColumnSpan(buttonsPanel, 2);
+        importPanel.Controls.AddRange(new Control[] { _importCsvButton, _clearPairsButton, csvInfoLabel });
+        mainPanel.Controls.Add(importPanel, 0, 1);
+        mainPanel.SetColumnSpan(importPanel, 2);
 
-        // Row 3: Site pairs grid
+        // Row 2: Site pairs grid
         var sitePairsPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 5, 0, 5) };
         var sitePairsLabel = new Label
         {
-            Text = "Site Pairs (root sites only):",
+            Text = "Site Pairs:",
             Dock = DockStyle.Top,
             Height = 20
         };
@@ -158,8 +130,100 @@ public class NavigationSettingsConfigScreen : BaseScreen
 
         sitePairsPanel.Controls.Add(_sitePairsGrid);
         sitePairsPanel.Controls.Add(sitePairsLabel);
-        mainPanel.Controls.Add(sitePairsPanel, 0, 3);
+        mainPanel.Controls.Add(sitePairsPanel, 0, 2);
         mainPanel.SetColumnSpan(sitePairsPanel, 2);
+
+        // Row 3: Options panel (exclusions + checkboxes)
+        var optionsPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 5, 0, 5) };
+
+        var optionsLayoutPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1
+        };
+        optionsLayoutPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60F));
+        optionsLayoutPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
+
+        // Exclusions list
+        var exclusionsPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 10, 0) };
+        var exclusionsLabel = new Label
+        {
+            Text = "Excluded Libraries (always excluded):",
+            Dock = DockStyle.Top,
+            Height = 20
+        };
+
+        _exclusionsListBox = new CheckedListBox
+        {
+            Dock = DockStyle.Fill,
+            CheckOnClick = true
+        };
+
+        // Add default exclusions (all checked by default)
+        foreach (var library in DocumentCompareConfiguration.DefaultExcludedLibraries)
+        {
+            _exclusionsListBox.Items.Add(library, true);
+        }
+
+        exclusionsPanel.Controls.Add(_exclusionsListBox);
+        exclusionsPanel.Controls.Add(exclusionsLabel);
+
+        // Checkboxes panel
+        var checkboxesPanel = new Panel { Dock = DockStyle.Fill };
+
+        _includeHiddenLibrariesCheckBox = new CheckBox
+        {
+            Text = "Include Hidden Libraries",
+            AutoSize = true,
+            Location = new Point(0, 20),
+            Checked = false
+        };
+
+        _includeAspxPagesCheckBox = new CheckBox
+        {
+            Text = "Include ASPX Pages",
+            AutoSize = true,
+            Location = new Point(0, 45),
+            Checked = false
+        };
+
+        _useShareGateNormalizationCheckBox = new CheckBox
+        {
+            Text = "Use ShareGate character normalization",
+            AutoSize = true,
+            Location = new Point(0, 70),
+            Checked = true
+        };
+        var normalizationTooltip = new ToolTip();
+        normalizationTooltip.SetToolTip(_useShareGateNormalizationCheckBox,
+            "Enable if migration replaced special characters (\" * : < > ? \\ & # % { } ~) with underscore");
+
+        _useCacheCheckBox = new CheckBox
+        {
+            Text = "Use cached scans (48h)",
+            AutoSize = true,
+            Location = new Point(0, 95),
+            Checked = false
+        };
+        var cacheTooltip = new ToolTip();
+        cacheTooltip.SetToolTip(_useCacheCheckBox,
+            "Reuse document scan results from previous runs if less than 48 hours old. Speeds up re-comparisons.");
+
+        checkboxesPanel.Controls.AddRange(new Control[]
+        {
+            _includeHiddenLibrariesCheckBox,
+            _includeAspxPagesCheckBox,
+            _useShareGateNormalizationCheckBox,
+            _useCacheCheckBox
+        });
+
+        optionsLayoutPanel.Controls.Add(exclusionsPanel, 0, 0);
+        optionsLayoutPanel.Controls.Add(checkboxesPanel, 1, 0);
+
+        optionsPanel.Controls.Add(optionsLayoutPanel);
+        mainPanel.Controls.Add(optionsPanel, 0, 3);
+        mainPanel.SetColumnSpan(optionsPanel, 2);
 
         // Row 4: Task name
         var taskNamePanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 5, 0, 5) };
@@ -173,7 +237,7 @@ public class NavigationSettingsConfigScreen : BaseScreen
         _taskNameTextBox = new TextBox
         {
             Dock = DockStyle.Top,
-            Text = $"Navigation Settings Sync - {DateTime.Now:yyyy-MM-dd HH:mm}"
+            Text = $"Document Compare - {DateTime.Now:yyyy-MM-dd HH:mm}"
         };
 
         taskNamePanel.Controls.Add(_taskNameTextBox);
@@ -231,36 +295,6 @@ public class NavigationSettingsConfigScreen : BaseScreen
 
     public override async Task OnNavigatedToAsync(object? parameter = null)
     {
-        // Check if we received a TaskCreationContext with selected sites
-        if (parameter is TaskCreationContext context)
-        {
-            _context = context;
-
-            // Filter out subsites from selected sites
-            _selectedSourceUrls = context.SelectedSites
-                .Where(s => !IsSubsiteUrl(s.Url))
-                .Select(s => s.Url)
-                .ToList();
-
-            var subsiteCount = context.SelectedSites.Count - _selectedSourceUrls.Count;
-
-            if (_selectedSourceUrls.Count > 0)
-            {
-                var message = $"{_selectedSourceUrls.Count} root site(s) selected";
-                if (subsiteCount > 0)
-                {
-                    message += $" ({subsiteCount} subsite(s) excluded)";
-                }
-                _selectedSitesLabel.Text = message;
-                _selectedSitesLabel.ForeColor = SystemColors.ControlText;
-            }
-            else
-            {
-                _selectedSitesLabel.Text = "No root sites in selection (subsites are not supported)";
-                _selectedSitesLabel.ForeColor = Color.DarkRed;
-            }
-        }
-
         await LoadConnectionsAsync();
     }
 
@@ -288,14 +322,8 @@ public class NavigationSettingsConfigScreen : BaseScreen
                 int sourceIndex = -1;
                 int targetIndex = -1;
 
-                // If we have a context, pre-select the source connection from context
-                if (_context != null)
-                {
-                    sourceIndex = _connections.FindIndex(c => c.Id == _context.Connection.Id);
-                }
-
-                // Try to use the first tenant pair
-                if (sourceIndex < 0 && tenantPairs.Count > 0)
+                // First, try to use the first tenant pair
+                if (tenantPairs.Count > 0)
                 {
                     var firstPair = tenantPairs[0];
                     sourceIndex = _connections.FindIndex(c => c.Id == firstPair.SourceConnectionId);
@@ -314,7 +342,7 @@ public class NavigationSettingsConfigScreen : BaseScreen
 
                 // Fall back to first/second connection
                 if (sourceIndex < 0) sourceIndex = 0;
-                if (targetIndex < 0) targetIndex = _connections.Count > 1 ? (sourceIndex == 0 ? 1 : 0) : 0;
+                if (targetIndex < 0) targetIndex = _connections.Count > 1 ? 1 : 0;
 
                 _sourceConnectionCombo.SelectedIndex = sourceIndex;
                 _targetConnectionCombo.SelectedIndex = targetIndex;
@@ -330,71 +358,16 @@ public class NavigationSettingsConfigScreen : BaseScreen
 
     private void ConnectionCombo_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        UpdateButtonStates();
+        UpdateCreateButtonState();
     }
 
-    private void UpdateButtonStates()
+    private void UpdateCreateButtonState()
     {
-        // Enable Generate Target URLs button if we have selected source URLs and both connections are selected
-        _generateTargetUrlsButton.Enabled = _selectedSourceUrls.Count > 0 &&
-                                            _sourceConnectionCombo.SelectedIndex >= 0 &&
-                                            _targetConnectionCombo.SelectedIndex >= 0;
-
         _createTaskButton.Enabled = _sourceConnectionCombo.SelectedIndex >= 0 &&
                                     _targetConnectionCombo.SelectedIndex >= 0 &&
                                     _sitePairs.Count > 0 &&
                                     !string.IsNullOrWhiteSpace(_taskNameTextBox.Text);
         _clearPairsButton.Enabled = _sitePairs.Count > 0;
-    }
-
-    private void GenerateTargetUrlsButton_Click(object? sender, EventArgs e)
-    {
-        if (_sourceConnectionCombo.SelectedIndex < 0 || _targetConnectionCombo.SelectedIndex < 0)
-        {
-            MessageBox.Show(
-                "Please select both source and target connections first.",
-                "Validation Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return;
-        }
-
-        if (_selectedSourceUrls.Count == 0)
-        {
-            MessageBox.Show(
-                "No source URLs available. Please select sites from the Site Collections screen.",
-                "No Sites Selected",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return;
-        }
-
-        var sourceConnection = _connections[_sourceConnectionCombo.SelectedIndex];
-        var targetConnection = _connections[_targetConnectionCombo.SelectedIndex];
-
-        // Generate target URLs by replacing the source tenant domain with target tenant domain
-        var generatedPairs = new List<SiteComparePair>();
-
-        foreach (var sourceUrl in _selectedSourceUrls)
-        {
-            var targetUrl = sourceUrl.Replace(
-                sourceConnection.TenantDomain,
-                targetConnection.TenantDomain,
-                StringComparison.OrdinalIgnoreCase);
-
-            generatedPairs.Add(new SiteComparePair
-            {
-                SourceUrl = sourceUrl,
-                TargetUrl = targetUrl
-            });
-        }
-
-        // Clear existing pairs and add generated ones
-        _sitePairs.Clear();
-        _sitePairs.AddRange(generatedPairs);
-        RefreshSitePairsGrid();
-
-        SetStatus($"Generated {generatedPairs.Count} site pair(s) by mapping {sourceConnection.TenantName} to {targetConnection.TenantName}");
     }
 
     private void ImportCsvButton_Click(object? sender, EventArgs e)
@@ -430,7 +403,7 @@ public class NavigationSettingsConfigScreen : BaseScreen
                     if (lineNumber == 1 && (line.Contains("Source", StringComparison.OrdinalIgnoreCase) ||
                                             line.Contains("URL", StringComparison.OrdinalIgnoreCase)))
                     {
-                        continue;
+                        continue; // Skip header
                     }
 
                     errors.Add($"Line {lineNumber}: Not enough columns");
@@ -441,30 +414,17 @@ public class NavigationSettingsConfigScreen : BaseScreen
                 var targetUrl = parts[1].Trim().Trim('"');
 
                 // Validate URLs
-                if (!Uri.TryCreate(sourceUrl, UriKind.Absolute, out var sourceUri))
+                if (!Uri.TryCreate(sourceUrl, UriKind.Absolute, out _))
                 {
                     if (lineNumber == 1) continue; // Skip header row
                     errors.Add($"Line {lineNumber}: Invalid source URL '{sourceUrl}'");
                     continue;
                 }
 
-                if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out var targetUri))
+                if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out _))
                 {
                     if (lineNumber == 1) continue; // Skip header row
                     errors.Add($"Line {lineNumber}: Invalid target URL '{targetUrl}'");
-                    continue;
-                }
-
-                // Check for subsites
-                if (IsSubsite(sourceUri))
-                {
-                    errors.Add($"Line {lineNumber}: Source URL appears to be a subsite. Only root sites are supported.");
-                    continue;
-                }
-
-                if (IsSubsite(targetUri))
-                {
-                    errors.Add($"Line {lineNumber}: Target URL appears to be a subsite. Only root sites are supported.");
                     continue;
                 }
 
@@ -516,30 +476,6 @@ public class NavigationSettingsConfigScreen : BaseScreen
         }
     }
 
-    private static bool IsSubsiteUrl(string url)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-            return false;
-        return IsSubsite(uri);
-    }
-
-    private static bool IsSubsite(Uri uri)
-    {
-        var pathParts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-
-        // Check if it's a /sites/ or /teams/ path with more than 2 segments
-        if (pathParts.Length > 2)
-        {
-            if (pathParts[0].Equals("sites", StringComparison.OrdinalIgnoreCase) ||
-                pathParts[0].Equals("teams", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private void ClearPairsButton_Click(object? sender, EventArgs e)
     {
         var result = MessageBox.Show(
@@ -565,7 +501,7 @@ public class NavigationSettingsConfigScreen : BaseScreen
             _sitePairsGrid.Rows.Add(pair.SourceUrl, pair.TargetUrl);
         }
 
-        UpdateButtonStates();
+        UpdateCreateButtonState();
     }
 
     private async void CreateTaskButton_Click(object? sender, EventArgs e)
@@ -575,7 +511,7 @@ public class NavigationSettingsConfigScreen : BaseScreen
             _sitePairs.Count == 0)
         {
             MessageBox.Show(
-                "Please select source and target connections and add at least one site pair.",
+                "Please select source and target connections and import at least one site pair.",
                 "Validation Error",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -603,11 +539,16 @@ public class NavigationSettingsConfigScreen : BaseScreen
             return;
 
         // Build configuration
-        var config = new NavigationSettingsConfiguration
+        var config = new DocumentCompareConfiguration
         {
             SourceConnectionId = sourceConnection.Id,
             TargetConnectionId = targetConnection.Id,
-            SitePairs = _sitePairs.ToList()
+            SitePairs = _sitePairs.ToList(),
+            ExcludedLibraries = GetExcludedLibraries(),
+            IncludeHiddenLibraries = _includeHiddenLibrariesCheckBox.Checked,
+            IncludeAspxPages = _includeAspxPagesCheckBox.Checked,
+            UseShareGateNormalization = _useShareGateNormalizationCheckBox.Checked,
+            UseCache = _useCacheCheckBox.Checked
         };
 
         // Create task
@@ -620,7 +561,7 @@ public class NavigationSettingsConfigScreen : BaseScreen
         var task = new TaskDefinition
         {
             Name = _taskNameTextBox.Text.Trim(),
-            Type = TaskType.NavigationSettingsSync,
+            Type = TaskType.DocumentCompare,
             ConnectionId = sourceConnection.Id,
             ConfigurationJson = JsonSerializer.Serialize(config, jsonOptions),
             Status = Models.TaskStatus.Pending
@@ -631,7 +572,22 @@ public class NavigationSettingsConfigScreen : BaseScreen
         SetStatus($"Task '{task.Name}' created with {_sitePairs.Count} site pairs");
 
         // Navigate to detail screen
-        await NavigationService!.NavigateToAsync<NavigationSettingsDetailScreen>(task);
+        await NavigationService!.NavigateToAsync<DocumentCompareDetailScreen>(task);
+    }
+
+    private List<string> GetExcludedLibraries()
+    {
+        var excluded = new List<string>();
+
+        for (int i = 0; i < _exclusionsListBox.Items.Count; i++)
+        {
+            if (_exclusionsListBox.GetItemChecked(i))
+            {
+                excluded.Add(_exclusionsListBox.Items[i].ToString()!);
+            }
+        }
+
+        return excluded;
     }
 
     private async Task<bool> EnsureAuthenticationAsync(Connection connection, string connectionLabel)

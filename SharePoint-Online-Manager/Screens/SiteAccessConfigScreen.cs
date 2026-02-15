@@ -8,34 +8,33 @@ using SharePointOnlineManager.Services;
 namespace SharePointOnlineManager.Screens;
 
 /// <summary>
-/// Screen for configuring a new Document Report task.
+/// Screen for configuring a new Site Access Check task.
 /// </summary>
-public class DocumentReportConfigScreen : BaseScreen
+public class SiteAccessConfigScreen : BaseScreen
 {
-    private ComboBox _connectionCombo = null!;
+    private ComboBox _sourceConnectionCombo = null!;
+    private ComboBox _targetConnectionCombo = null!;
     private Button _importCsvButton = null!;
-    private DataGridView _sitesGrid = null!;
-    private CheckBox _includeHiddenCheckBox = null!;
-    private CheckBox _includeSubfoldersCheckBox = null!;
-    private CheckBox _includeVersionsCheckBox = null!;
-    private TextBox _extensionFilterTextBox = null!;
+    private DataGridView _sitePairsGrid = null!;
     private TextBox _taskNameTextBox = null!;
     private Button _createTaskButton = null!;
-    private Button _clearSitesButton = null!;
+    private Button _clearPairsButton = null!;
 
     private IConnectionManager _connectionManager = null!;
     private IAuthenticationService _authService = null!;
     private ITaskService _taskService = null!;
+    private ITenantPairService _tenantPairService = null!;
     private List<Connection> _connections = [];
-    private List<string> _siteUrls = [];
+    private List<SiteComparePair> _sitePairs = [];
 
-    public override string ScreenTitle => "Create Document Report Task";
+    public override string ScreenTitle => "Create Site Access Check Task";
 
     protected override void OnInitialize()
     {
         _connectionManager = GetRequiredService<IConnectionManager>();
         _authService = GetRequiredService<IAuthenticationService>();
         _taskService = GetRequiredService<ITaskService>();
+        _tenantPairService = GetRequiredService<ITenantPairService>();
         InitializeUI();
     }
 
@@ -48,23 +47,22 @@ public class DocumentReportConfigScreen : BaseScreen
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 7,
+            RowCount = 5,
             Padding = new Padding(10)
         };
         mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
         mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));  // Connection row
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));  // Import button row
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));   // Sites grid
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 100)); // Options panel
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));  // Extension filter
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));  // Task name
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));  // Create button
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 70)); // Connections row
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); // Import button row
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // Site pairs grid
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 60)); // Task name
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); // Create button
 
-        // Row 0: Connection selector
-        var connectionPanel = CreateConnectionPanel("Connection:", out _connectionCombo);
-        mainPanel.Controls.Add(connectionPanel, 0, 0);
-        mainPanel.SetColumnSpan(connectionPanel, 2);
+        // Row 0: Connection selectors
+        var sourceConnPanel = CreateConnectionPanel("Source Connection:", out _sourceConnectionCombo);
+        var targetConnPanel = CreateConnectionPanel("Target Connection:", out _targetConnectionCombo);
+        mainPanel.Controls.Add(sourceConnPanel, 0, 0);
+        mainPanel.Controls.Add(targetConnPanel, 1, 0);
 
         // Row 1: Import CSV button
         var importPanel = new FlowLayoutPanel
@@ -82,36 +80,36 @@ public class DocumentReportConfigScreen : BaseScreen
         };
         _importCsvButton.Click += ImportCsvButton_Click;
 
-        _clearSitesButton = new Button
+        _clearPairsButton = new Button
         {
             Text = "Clear All",
             Size = new Size(80, 28),
             Enabled = false
         };
-        _clearSitesButton.Click += ClearSitesButton_Click;
+        _clearPairsButton.Click += ClearPairsButton_Click;
 
         var csvInfoLabel = new Label
         {
-            Text = "CSV format: Site URL (one per line or comma-separated)",
+            Text = "CSV format: Source URL, Target URL",
             AutoSize = true,
             ForeColor = SystemColors.GrayText,
             Padding = new Padding(10, 8, 0, 0)
         };
 
-        importPanel.Controls.AddRange(new Control[] { _importCsvButton, _clearSitesButton, csvInfoLabel });
+        importPanel.Controls.AddRange(new Control[] { _importCsvButton, _clearPairsButton, csvInfoLabel });
         mainPanel.Controls.Add(importPanel, 0, 1);
         mainPanel.SetColumnSpan(importPanel, 2);
 
-        // Row 2: Sites grid
-        var sitesPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 5, 0, 5) };
-        var sitesLabel = new Label
+        // Row 2: Site pairs grid
+        var sitePairsPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 5, 0, 5) };
+        var sitePairsLabel = new Label
         {
-            Text = "Target Sites:",
+            Text = "Site Pairs:",
             Dock = DockStyle.Top,
             Height = 20
         };
 
-        _sitesGrid = new DataGridView
+        _sitePairsGrid = new DataGridView
         {
             Dock = DockStyle.Fill,
             AllowUserToAddRows = false,
@@ -121,75 +119,15 @@ public class DocumentReportConfigScreen : BaseScreen
             SelectionMode = DataGridViewSelectionMode.FullRowSelect,
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
         };
-        _sitesGrid.Columns.Add("SiteUrl", "Site URL");
+        _sitePairsGrid.Columns.Add("SourceUrl", "Source URL");
+        _sitePairsGrid.Columns.Add("TargetUrl", "Target URL");
 
-        sitesPanel.Controls.Add(_sitesGrid);
-        sitesPanel.Controls.Add(sitesLabel);
-        mainPanel.Controls.Add(sitesPanel, 0, 2);
-        mainPanel.SetColumnSpan(sitesPanel, 2);
+        sitePairsPanel.Controls.Add(_sitePairsGrid);
+        sitePairsPanel.Controls.Add(sitePairsLabel);
+        mainPanel.Controls.Add(sitePairsPanel, 0, 2);
+        mainPanel.SetColumnSpan(sitePairsPanel, 2);
 
-        // Row 3: Options panel
-        var optionsPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(0, 5, 0, 5)
-        };
-
-        _includeHiddenCheckBox = new CheckBox
-        {
-            Text = "Include Hidden Libraries",
-            AutoSize = true,
-            Checked = false,
-            Margin = new Padding(0, 5, 30, 0)
-        };
-
-        _includeSubfoldersCheckBox = new CheckBox
-        {
-            Text = "Include Subfolders",
-            AutoSize = true,
-            Checked = true,
-            Margin = new Padding(0, 5, 30, 0)
-        };
-
-        _includeVersionsCheckBox = new CheckBox
-        {
-            Text = "Include Version Count",
-            AutoSize = true,
-            Checked = true,
-            Margin = new Padding(0, 5, 0, 0)
-        };
-
-        optionsPanel.Controls.AddRange(new Control[]
-        {
-            _includeHiddenCheckBox,
-            _includeSubfoldersCheckBox,
-            _includeVersionsCheckBox
-        });
-        mainPanel.Controls.Add(optionsPanel, 0, 3);
-        mainPanel.SetColumnSpan(optionsPanel, 2);
-
-        // Row 4: Extension filter
-        var extensionPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 5, 0, 5) };
-        var extensionLabel = new Label
-        {
-            Text = "Extension Filter (comma-separated, e.g., pdf,docx,xlsx - leave empty for all):",
-            Dock = DockStyle.Top,
-            Height = 20
-        };
-
-        _extensionFilterTextBox = new TextBox
-        {
-            Dock = DockStyle.Top,
-            PlaceholderText = "e.g., pdf, docx, xlsx (leave empty for all files)"
-        };
-
-        extensionPanel.Controls.Add(_extensionFilterTextBox);
-        extensionPanel.Controls.Add(extensionLabel);
-        mainPanel.Controls.Add(extensionPanel, 0, 4);
-        mainPanel.SetColumnSpan(extensionPanel, 2);
-
-        // Row 5: Task name
+        // Row 3: Task name
         var taskNamePanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 5, 0, 5) };
         var taskNameLabel = new Label
         {
@@ -201,15 +139,15 @@ public class DocumentReportConfigScreen : BaseScreen
         _taskNameTextBox = new TextBox
         {
             Dock = DockStyle.Top,
-            Text = $"Document Report - {DateTime.Now:yyyy-MM-dd HH:mm}"
+            Text = $"Site Access Check - {DateTime.Now:yyyy-MM-dd HH:mm}"
         };
 
         taskNamePanel.Controls.Add(_taskNameTextBox);
         taskNamePanel.Controls.Add(taskNameLabel);
-        mainPanel.Controls.Add(taskNamePanel, 0, 5);
+        mainPanel.Controls.Add(taskNamePanel, 0, 3);
         mainPanel.SetColumnSpan(taskNamePanel, 2);
 
-        // Row 6: Create button
+        // Row 4: Create button
         var buttonPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -226,7 +164,7 @@ public class DocumentReportConfigScreen : BaseScreen
         _createTaskButton.Click += CreateTaskButton_Click;
 
         buttonPanel.Controls.Add(_createTaskButton);
-        mainPanel.Controls.Add(buttonPanel, 0, 6);
+        mainPanel.Controls.Add(buttonPanel, 0, 4);
         mainPanel.SetColumnSpan(buttonPanel, 2);
 
         Controls.Add(mainPanel);
@@ -269,18 +207,47 @@ public class DocumentReportConfigScreen : BaseScreen
         try
         {
             _connections = await _connectionManager.GetAllConnectionsAsync();
+            var tenantPairs = await _tenantPairService.GetAllPairsAsync();
 
-            _connectionCombo.Items.Clear();
+            _sourceConnectionCombo.Items.Clear();
+            _targetConnectionCombo.Items.Clear();
 
             foreach (var conn in _connections)
             {
                 var displayName = $"{conn.Name} ({conn.TenantName})";
-                _connectionCombo.Items.Add(displayName);
+                _sourceConnectionCombo.Items.Add(displayName);
+                _targetConnectionCombo.Items.Add(displayName);
             }
 
             if (_connections.Count > 0)
             {
-                _connectionCombo.SelectedIndex = 0;
+                int sourceIndex = -1;
+                int targetIndex = -1;
+
+                // First, try to use the first tenant pair
+                if (tenantPairs.Count > 0)
+                {
+                    var firstPair = tenantPairs[0];
+                    sourceIndex = _connections.FindIndex(c => c.Id == firstPair.SourceConnectionId);
+                    targetIndex = _connections.FindIndex(c => c.Id == firstPair.TargetConnectionId);
+                }
+
+                // If no tenant pair, try to use connection roles
+                if (sourceIndex < 0)
+                {
+                    sourceIndex = _connections.FindIndex(c => c.Role == TenantRole.Source);
+                }
+                if (targetIndex < 0)
+                {
+                    targetIndex = _connections.FindIndex(c => c.Role == TenantRole.Target);
+                }
+
+                // Fall back to first/second connection
+                if (sourceIndex < 0) sourceIndex = 0;
+                if (targetIndex < 0) targetIndex = _connections.Count > 1 ? 1 : 0;
+
+                _sourceConnectionCombo.SelectedIndex = sourceIndex;
+                _targetConnectionCombo.SelectedIndex = targetIndex;
             }
 
             SetStatus($"Loaded {_connections.Count} connections");
@@ -298,18 +265,19 @@ public class DocumentReportConfigScreen : BaseScreen
 
     private void UpdateCreateButtonState()
     {
-        _createTaskButton.Enabled = _connectionCombo.SelectedIndex >= 0 &&
-                                    _siteUrls.Count > 0 &&
+        _createTaskButton.Enabled = _sourceConnectionCombo.SelectedIndex >= 0 &&
+                                    _targetConnectionCombo.SelectedIndex >= 0 &&
+                                    _sitePairs.Count > 0 &&
                                     !string.IsNullOrWhiteSpace(_taskNameTextBox.Text);
-        _clearSitesButton.Enabled = _siteUrls.Count > 0;
+        _clearPairsButton.Enabled = _sitePairs.Count > 0;
     }
 
     private void ImportCsvButton_Click(object? sender, EventArgs e)
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "CSV Files (*.csv)|*.csv|Text Files (*.txt)|*.txt|All Files (*.*)|*.*",
-            Title = "Select Sites File"
+            Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*",
+            Title = "Select Site Pairs CSV File"
         };
 
         if (dialog.ShowDialog() != DialogResult.OK)
@@ -318,7 +286,7 @@ public class DocumentReportConfigScreen : BaseScreen
         try
         {
             var lines = File.ReadAllLines(dialog.FileName);
-            var importedSites = new List<string>();
+            var importedPairs = new List<SiteComparePair>();
             var errors = new List<string>();
             var lineNumber = 0;
 
@@ -326,50 +294,64 @@ public class DocumentReportConfigScreen : BaseScreen
             {
                 lineNumber++;
 
-                // Skip empty lines
+                // Skip empty lines and header
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
 
-                // Split by comma in case multiple URLs per line
-                var urls = line.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (var urlPart in urls)
+                var parts = line.Split(',');
+                if (parts.Length < 2)
                 {
-                    var url = urlPart.Trim().Trim('"');
-
-                    // Validate URL
-                    if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-                        (uri.Scheme != "http" && uri.Scheme != "https"))
+                    // Try to detect if this is a header line
+                    if (lineNumber == 1 && (line.Contains("Source", StringComparison.OrdinalIgnoreCase) ||
+                                            line.Contains("URL", StringComparison.OrdinalIgnoreCase)))
                     {
-                        if (lineNumber == 1) continue; // Skip header row
-                        errors.Add($"Line {lineNumber}: Invalid URL '{url}'");
-                        continue;
+                        continue; // Skip header
                     }
 
-                    // Avoid duplicates
-                    if (!importedSites.Contains(url, StringComparer.OrdinalIgnoreCase) &&
-                        !_siteUrls.Contains(url, StringComparer.OrdinalIgnoreCase))
-                    {
-                        importedSites.Add(url);
-                    }
+                    errors.Add($"Line {lineNumber}: Not enough columns");
+                    continue;
                 }
+
+                var sourceUrl = parts[0].Trim().Trim('"');
+                var targetUrl = parts[1].Trim().Trim('"');
+
+                // Validate URLs
+                if (!Uri.TryCreate(sourceUrl, UriKind.Absolute, out _))
+                {
+                    if (lineNumber == 1) continue; // Skip header row
+                    errors.Add($"Line {lineNumber}: Invalid source URL '{sourceUrl}'");
+                    continue;
+                }
+
+                if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out _))
+                {
+                    if (lineNumber == 1) continue; // Skip header row
+                    errors.Add($"Line {lineNumber}: Invalid target URL '{targetUrl}'");
+                    continue;
+                }
+
+                importedPairs.Add(new SiteComparePair
+                {
+                    SourceUrl = sourceUrl,
+                    TargetUrl = targetUrl
+                });
             }
 
-            if (errors.Count > 0 && importedSites.Count == 0)
+            if (errors.Count > 0 && importedPairs.Count == 0)
             {
                 MessageBox.Show(
-                    $"Failed to import file:\n\n{string.Join("\n", errors.Take(10))}",
+                    $"Failed to import CSV file:\n\n{string.Join("\n", errors.Take(10))}",
                     "Import Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
             }
 
-            // Add imported sites
-            _siteUrls.AddRange(importedSites);
-            RefreshSitesGrid();
+            // Add imported pairs
+            _sitePairs.AddRange(importedPairs);
+            RefreshSitePairsGrid();
 
-            var message = $"Imported {importedSites.Count} site(s).";
+            var message = $"Imported {importedPairs.Count} site pair(s).";
             if (errors.Count > 0)
             {
                 message += $"\n\n{errors.Count} line(s) had errors and were skipped.";
@@ -389,36 +371,36 @@ public class DocumentReportConfigScreen : BaseScreen
         catch (Exception ex)
         {
             MessageBox.Show(
-                $"Failed to read file: {ex.Message}",
+                $"Failed to read CSV file: {ex.Message}",
                 "Import Error",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
     }
 
-    private void ClearSitesButton_Click(object? sender, EventArgs e)
+    private void ClearPairsButton_Click(object? sender, EventArgs e)
     {
         var result = MessageBox.Show(
-            "Are you sure you want to clear all sites?",
-            "Clear Sites",
+            "Are you sure you want to clear all site pairs?",
+            "Clear Site Pairs",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
 
         if (result == DialogResult.Yes)
         {
-            _siteUrls.Clear();
-            RefreshSitesGrid();
-            SetStatus("Sites cleared");
+            _sitePairs.Clear();
+            RefreshSitePairsGrid();
+            SetStatus("Site pairs cleared");
         }
     }
 
-    private void RefreshSitesGrid()
+    private void RefreshSitePairsGrid()
     {
-        _sitesGrid.Rows.Clear();
+        _sitePairsGrid.Rows.Clear();
 
-        foreach (var url in _siteUrls)
+        foreach (var pair in _sitePairs)
         {
-            _sitesGrid.Rows.Add(url);
+            _sitePairsGrid.Rows.Add(pair.SourceUrl, pair.TargetUrl);
         }
 
         UpdateCreateButtonState();
@@ -426,10 +408,12 @@ public class DocumentReportConfigScreen : BaseScreen
 
     private async void CreateTaskButton_Click(object? sender, EventArgs e)
     {
-        if (_connectionCombo.SelectedIndex < 0 || _siteUrls.Count == 0)
+        if (_sourceConnectionCombo.SelectedIndex < 0 ||
+            _targetConnectionCombo.SelectedIndex < 0 ||
+            _sitePairs.Count == 0)
         {
             MessageBox.Show(
-                "Please select a connection and import at least one site.",
+                "Please select source and target connections and import at least one site pair.",
                 "Validation Error",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -446,24 +430,25 @@ public class DocumentReportConfigScreen : BaseScreen
             return;
         }
 
-        var connection = _connections[_connectionCombo.SelectedIndex];
+        var sourceConnection = _connections[_sourceConnectionCombo.SelectedIndex];
+        var targetConnection = _connections[_targetConnectionCombo.SelectedIndex];
 
-        // Check authentication
-        if (!await EnsureAuthenticationAsync(connection))
+        // Check authentication for both connections
+        if (!await EnsureAuthenticationAsync(sourceConnection, "source"))
+            return;
+
+        if (!await EnsureAuthenticationAsync(targetConnection, "target"))
             return;
 
         // Build configuration
-        var config = new DocumentReportConfiguration
+        var config = new SiteAccessConfiguration
         {
-            ConnectionId = connection.Id,
-            TargetSiteUrls = _siteUrls.ToList(),
-            IncludeHiddenLibraries = _includeHiddenCheckBox.Checked,
-            IncludeSubfolders = _includeSubfoldersCheckBox.Checked,
-            IncludeVersionCount = _includeVersionsCheckBox.Checked,
-            ExtensionFilter = _extensionFilterTextBox.Text.Trim()
+            SourceConnectionId = sourceConnection.Id,
+            TargetConnectionId = targetConnection.Id,
+            SitePairs = _sitePairs.ToList()
         };
 
-        // Create task
+        // Create task - use camelCase to match TaskService deserialization
         var jsonOptions = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -473,28 +458,27 @@ public class DocumentReportConfigScreen : BaseScreen
         var task = new TaskDefinition
         {
             Name = _taskNameTextBox.Text.Trim(),
-            Type = TaskType.DocumentReport,
-            ConnectionId = connection.Id,
-            TargetSiteUrls = _siteUrls.ToList(),
+            Type = TaskType.SiteAccessCheck,
+            ConnectionId = sourceConnection.Id, // Primary connection for display
             ConfigurationJson = JsonSerializer.Serialize(config, jsonOptions),
             Status = Models.TaskStatus.Pending
         };
 
         await _taskService.SaveTaskAsync(task);
 
-        SetStatus($"Task '{task.Name}' created with {_siteUrls.Count} sites");
+        SetStatus($"Task '{task.Name}' created with {_sitePairs.Count} site pairs");
 
         // Navigate to detail screen
-        await NavigationService!.NavigateToAsync<DocumentReportDetailScreen>(task);
+        await NavigationService!.NavigateToAsync<SiteAccessDetailScreen>(task);
     }
 
-    private async Task<bool> EnsureAuthenticationAsync(Connection connection)
+    private async Task<bool> EnsureAuthenticationAsync(Connection connection, string connectionLabel)
     {
         if (_authService.HasStoredCredentials(connection.CookieDomain))
             return true;
 
         var result = MessageBox.Show(
-            $"Authentication required for connection '{connection.Name}'.\n\nWould you like to sign in?",
+            $"Authentication required for {connectionLabel} connection '{connection.Name}'.\n\nWould you like to sign in?",
             "Authentication Required",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
