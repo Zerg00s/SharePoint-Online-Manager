@@ -534,7 +534,8 @@ public class PermissionReportDetailScreen : BaseScreen
         {
             progressPanel.Visible = true;
         }
-        _progressBar.Value = 0;
+        _progressBar.Style = ProgressBarStyle.Marquee;
+        _progressBar.MarqueeAnimationSpeed = 30;
         _progressLabel.Text = "Starting...";
 
         _cancellationTokenSource = new CancellationTokenSource();
@@ -548,8 +549,15 @@ public class PermissionReportDetailScreen : BaseScreen
 
         var progress = new Progress<TaskProgress>(p =>
         {
-            _progressBar.Value = p.PercentComplete;
             _progressLabel.Text = p.Message;
+
+            // Stream log entries live
+            if (_currentResult != null && _currentResult.ExecutionLog.Count > 0)
+            {
+                _logTextBox.Text = string.Join(Environment.NewLine, _currentResult.ExecutionLog);
+                _logTextBox.SelectionStart = _logTextBox.TextLength;
+                _logTextBox.ScrollToCaret();
+            }
         });
 
         try
@@ -584,6 +592,7 @@ public class PermissionReportDetailScreen : BaseScreen
             _deleteButton.Enabled = true;
             _exportButton.Enabled = _currentResult != null;
             _exportSummaryButton.Enabled = _currentResult != null;
+            _progressBar.Style = ProgressBarStyle.Blocks;
             if (progressPanel != null)
             {
                 progressPanel.Visible = false;

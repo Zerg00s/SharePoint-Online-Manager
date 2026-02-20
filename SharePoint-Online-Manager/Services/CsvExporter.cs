@@ -91,6 +91,27 @@ public class CsvExporter
     }
 
     /// <summary>
+    /// Exports a collection of list compare items to a CSV file.
+    /// </summary>
+    public void ExportListCompareItems(IEnumerable<ListCompareItem> items, string filePath)
+    {
+        var exportItems = items.Select(c => new ListCompareExportItem
+        {
+            SourceSiteUrl = c.SourceSiteUrl,
+            TargetSiteUrl = c.TargetSiteUrl,
+            ListTitle = c.ListTitle,
+            ListType = c.ListType,
+            SourceCount = c.SourceCount,
+            TargetCount = c.TargetCount,
+            Difference = c.Difference,
+            PercentDifference = $"{c.PercentDifference:F1}%",
+            Status = c.StatusDescription
+        }).ToList();
+
+        ExportToCsv(exportItems, filePath);
+    }
+
+    /// <summary>
     /// Exports sites with issues to a CSV file.
     /// </summary>
     public void ExportIssuesSummary(ListCompareResult result, string filePath)

@@ -1050,12 +1050,14 @@ public class TaskService : ITaskService
                     cancellationToken.ThrowIfCancellationRequested();
 
                     processedCount++;
+                    var siteLabel = $"Site {processedCount}/{targetUrls.Count}";
+
                     progress?.Report(new TaskProgress
                     {
                         CurrentSite = processedCount,
                         TotalSites = targetUrls.Count,
                         CurrentSiteUrl = siteUrl,
-                        Message = $"Processing {processedCount}/{targetUrls.Count}: {siteUrl}"
+                        Message = $"{siteLabel}: Connecting to {siteUrl}..."
                     });
 
                     result.Log($"Processing site: {siteUrl}");
@@ -1083,6 +1085,14 @@ public class TaskService : ITaskService
                         // Get site/web permissions
                         if (config.IncludeSitePermissions)
                         {
+                            progress?.Report(new TaskProgress
+                            {
+                                CurrentSite = processedCount,
+                                TotalSites = targetUrls.Count,
+                                CurrentSiteUrl = siteUrl,
+                                Message = $"{siteLabel}: Scanning site permissions... ({siteResult.TotalPermissions} found so far)"
+                            });
+
                             result.Log($"  Getting site permissions...");
                             System.Diagnostics.Debug.WriteLine($"[SPOManager]   Getting web permissions (includeInherited={config.IncludeInheritedPermissions})...");
 
@@ -1110,13 +1120,30 @@ public class TaskService : ITaskService
                         // Get lists and libraries
                         if (config.IncludeListPermissions || config.IncludeFolderPermissions || config.IncludeItemPermissions)
                         {
+                            progress?.Report(new TaskProgress
+                            {
+                                CurrentSite = processedCount,
+                                TotalSites = targetUrls.Count,
+                                CurrentSiteUrl = siteUrl,
+                                Message = $"{siteLabel}: Fetching lists/libraries..."
+                            });
+
                             System.Diagnostics.Debug.WriteLine($"[SPOManager]   Getting lists (includeHidden={config.IncludeHiddenLists})...");
                             var listsResult = await spService.GetListsAsync(siteUrl, config.IncludeHiddenLists);
                             System.Diagnostics.Debug.WriteLine($"[SPOManager]   Lists result: Status={listsResult.Status}, Count={listsResult.Data?.Count ?? 0}");
 
                             if (listsResult.IsSuccess && listsResult.Data != null)
                             {
-                                result.Log($"  Processing {listsResult.Data.Count} lists/libraries...");
+                                var totalLists = listsResult.Data.Count;
+                                result.Log($"  Found {totalLists} lists/libraries");
+
+                                progress?.Report(new TaskProgress
+                                {
+                                    CurrentSite = processedCount,
+                                    TotalSites = targetUrls.Count,
+                                    CurrentSiteUrl = siteUrl,
+                                    Message = $"{siteLabel}: Found {totalLists} lists/libraries"
+                                });
 
                                 int listIndex = 0;
                                 foreach (var list in listsResult.Data)
@@ -1125,11 +1152,20 @@ public class TaskService : ITaskService
                                     cancellationToken.ThrowIfCancellationRequested();
 
                                     var isLibrary = list.BaseTemplate == 101;
-                                    System.Diagnostics.Debug.WriteLine($"[SPOManager]   --- List {listIndex}/{listsResult.Data.Count}: '{list.Title}' (Template={list.BaseTemplate}, IsLibrary={isLibrary}) ---");
+                                    var listLabel = $"List {listIndex}/{totalLists} - {list.Title}";
+                                    System.Diagnostics.Debug.WriteLine($"[SPOManager]   --- List {listIndex}/{totalLists}: '{list.Title}' (Template={list.BaseTemplate}, IsLibrary={isLibrary}) ---");
 
                                     // Get list permissions
                                     if (config.IncludeListPermissions)
                                     {
+                                        progress?.Report(new TaskProgress
+                                        {
+                                            CurrentSite = processedCount,
+                                            TotalSites = targetUrls.Count,
+                                            CurrentSiteUrl = siteUrl,
+                                            Message = $"{siteLabel}: {listLabel} (permissions)... [{siteResult.TotalPermissions} found]"
+                                        });
+
                                         System.Diagnostics.Debug.WriteLine($"[SPOManager]     Getting list permissions...");
                                         var listPermsResult = await spService.GetListPermissionsAsync(
                                             siteUrl, siteCollectionUrl, list.Title, isLibrary,
@@ -1147,18 +1183,50 @@ public class TaskService : ITaskService
                                     // Get item/folder permissions (only if unique permissions exist)
                                     if (config.IncludeFolderPermissions || config.IncludeItemPermissions)
                                     {
+                                        progress?.Report(new TaskProgress
+                                        {
+                                            CurrentSite = processedCount,
+                                            TotalSites = targetUrls.Count,
+                                            CurrentSiteUrl = siteUrl,
+                                            Message = $"{siteLabel}: {listLabel} (scanning items)... [{siteResult.TotalPermissions} found]"
+                                        });
+
                                         System.Diagnostics.Debug.WriteLine($"[SPOManager]     Getting item permissions (folders={config.IncludeFolderPermissions}, items={config.IncludeItemPermissions})...");
                                         var itemPermsResult = await spService.GetItemPermissionsAsync(
                                             siteUrl, siteCollectionUrl, list.Title, isLibrary,
                                             config.IncludeFolderPermissions, config.IncludeItemPermissions,
-                                            config.IncludeInheritedPermissions);
+                                            config.IncludeInheritedPermissions,
+                                            onPageScanned: (itemsScanned, uniquePerms) =>
+                                            {
+                                                progress?.Report(new TaskProgress
+                                                {
+                                                    CurrentSite = processedCount,
+                                                    TotalSites = targetUrls.Count,
+                                                    CurrentSiteUrl = siteUrl,
+                                                    Message = $"{siteLabel}: {listLabel} ({itemsScanned} items scanned, {uniquePerms} unique) [{siteResult.TotalPermissions} found]"
+                                                });
+                                            });
 
                                         System.Diagnostics.Debug.WriteLine($"[SPOManager]     Item permissions result: Status={itemPermsResult.Status}, Count={itemPermsResult.Data?.Count ?? 0}");
 
-                                        if (itemPermsResult.IsSuccess && itemPermsResult.Data != null && itemPermsResult.Data.Count > 0)
+                                        if (itemPermsResult.IsSuccess && itemPermsResult.Data != null)
                                         {
-                                            siteResult.Permissions.AddRange(itemPermsResult.Data);
-                                            result.Log($"    {list.Title}: {itemPermsResult.Data.Count} item/folder permission entries");
+                                            if (itemPermsResult.Data.Count > 0)
+                                            {
+                                                siteResult.Permissions.AddRange(itemPermsResult.Data);
+                                                var folders = itemPermsResult.Data.Count(p => p.ObjectType == PermissionObjectType.Folder);
+                                                var docs = itemPermsResult.Data.Count(p => p.ObjectType == PermissionObjectType.Document);
+                                                var listItems = itemPermsResult.Data.Count(p => p.ObjectType == PermissionObjectType.ListItem);
+                                                result.Log($"    {list.Title}: {itemPermsResult.Data.Count} item/folder entries (Folders: {folders}, Documents: {docs}, ListItems: {listItems})");
+                                            }
+                                            else
+                                            {
+                                                result.Log($"    {list.Title}: 0 items with unique permissions");
+                                            }
+                                        }
+                                        else if (!itemPermsResult.IsSuccess)
+                                        {
+                                            result.Log($"    {list.Title}: item scan error - {itemPermsResult.ErrorMessage}");
                                         }
                                     }
                                 }
@@ -1310,7 +1378,8 @@ public class TaskService : ITaskService
         IConnectionManager connectionManager,
         bool applyMode = false,
         IProgress<TaskProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<NavigationSettingsCompareItem>? onSiteCompleted = null)
     {
         var result = new NavigationSettingsResult
         {
@@ -1504,6 +1573,7 @@ public class TaskService : ITaskService
 
                 result.SiteResults.Add(siteResult);
                 result.TotalPairsProcessed++;
+                onSiteCompleted?.Invoke(siteResult);
             }
 
             result.CompletedAt = DateTime.UtcNow;

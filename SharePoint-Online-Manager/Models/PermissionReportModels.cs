@@ -25,7 +25,7 @@ public class PermissionReportConfiguration
     public bool IncludeSitePermissions { get; set; } = true;
     public bool IncludeListPermissions { get; set; } = true;
     public bool IncludeFolderPermissions { get; set; } = true;
-    public bool IncludeItemPermissions { get; set; } = false; // Can be very slow for large libraries
+    public bool IncludeItemPermissions { get; set; } = true;
     public bool IncludeInheritedPermissions { get; set; } = false; // Only show unique permissions by default
     public bool IncludeHiddenLists { get; set; } = false;
 }

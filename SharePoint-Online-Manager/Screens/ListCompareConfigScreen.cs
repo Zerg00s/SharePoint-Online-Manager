@@ -316,6 +316,22 @@ public class ListCompareConfigScreen : BaseScreen
     public override async Task OnNavigatedToAsync(object? parameter = null)
     {
         await LoadConnectionsAsync();
+
+        if (parameter is TenantPairTaskContext ctx && ctx.TenantPair.SitePairs.Count > 0)
+        {
+            _sitePairs.AddRange(ctx.TenantPair.SitePairs);
+            RefreshSitePairsGrid();
+            SelectConnectionById(_sourceConnectionCombo, ctx.TenantPair.SourceConnectionId);
+            SelectConnectionById(_targetConnectionCombo, ctx.TenantPair.TargetConnectionId);
+            SetStatus($"Loaded {ctx.TenantPair.SitePairs.Count} site pair(s) from tenant pair");
+        }
+    }
+
+    private void SelectConnectionById(ComboBox combo, Guid connectionId)
+    {
+        var index = _connections.FindIndex(c => c.Id == connectionId);
+        if (index >= 0)
+            combo.SelectedIndex = index;
     }
 
     private async Task LoadConnectionsAsync()

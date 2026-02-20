@@ -105,7 +105,8 @@ public interface ISharePointService : IDisposable
         bool isLibrary,
         bool includeFolders = true,
         bool includeItems = true,
-        bool includeInherited = false);
+        bool includeInherited = false,
+        Action<int, int>? onPageScanned = null);
 
     /// <summary>
     /// Deletes a site collection (sends to recycle bin).

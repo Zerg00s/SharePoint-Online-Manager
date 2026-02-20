@@ -605,6 +605,9 @@ public class SiteCollectionsScreen : BaseScreen
 
     private void RefreshGrid()
     {
+        if (_sitesGrid.Columns.Count == 0)
+            return;
+
         _sitesGrid.Rows.Clear();
 
         foreach (var site in _filteredSites)

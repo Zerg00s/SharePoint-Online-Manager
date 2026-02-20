@@ -133,7 +133,8 @@ public interface ITaskService
         IConnectionManager connectionManager,
         bool applyMode = false,
         IProgress<TaskProgress>? progress = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        Action<NavigationSettingsCompareItem>? onSiteCompleted = null);
 
     /// <summary>
     /// Gets all navigation settings results for a task.

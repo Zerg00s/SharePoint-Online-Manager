@@ -303,6 +303,7 @@ public class HomeScreen : BaseScreen
         _tenantPairsListView.Columns.Add("Target Tenant", 200);
         _tenantPairsListView.Columns.Add("Name", 150);
         _tenantPairsListView.SelectedIndexChanged += TenantPairsListView_SelectedIndexChanged;
+        _tenantPairsListView.DoubleClick += TenantPairsListView_DoubleClick;
 
         pairsPanel.Controls.Add(_tenantPairsListView);
         pairsPanel.Controls.Add(pairsHeaderPanel);
@@ -615,6 +616,15 @@ public class HomeScreen : BaseScreen
     private void TenantPairsListView_SelectedIndexChanged(object? sender, EventArgs e)
     {
         _deletePairButton.Enabled = _tenantPairsListView.SelectedItems.Count > 0;
+    }
+
+    private async void TenantPairsListView_DoubleClick(object? sender, EventArgs e)
+    {
+        if (_tenantPairsListView.SelectedItems.Count == 0)
+            return;
+
+        var pair = (TenantPair)_tenantPairsListView.SelectedItems[0].Tag;
+        await NavigationService!.NavigateToAsync<TenantPairDetailScreen>(pair);
     }
 
     private async void AddPairButton_Click(object? sender, EventArgs e)

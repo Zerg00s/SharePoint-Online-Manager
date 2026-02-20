@@ -26,6 +26,11 @@ public class TenantPair
     /// When this pair was created.
     /// </summary>
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Site URL mappings associated with this tenant pair.
+    /// </summary>
+    public List<SiteComparePair> SitePairs { get; set; } = [];
 }
 
 /// <summary>
@@ -34,4 +39,12 @@ public class TenantPair
 public class TenantPairConfiguration
 {
     public List<TenantPair> Pairs { get; set; } = [];
+}
+
+/// <summary>
+/// Context for navigating from a tenant pair detail screen to a task config screen.
+/// </summary>
+public class TenantPairTaskContext
+{
+    public required TenantPair TenantPair { get; init; }
 }

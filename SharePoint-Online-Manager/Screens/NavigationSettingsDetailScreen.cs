@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using SharePointOnlineManager.Forms;
 using SharePointOnlineManager.Models;
 using SharePointOnlineManager.Navigation;
@@ -30,6 +31,8 @@ public class NavigationSettingsDetailScreen : BaseScreen
     private IAuthenticationService _authService = null!;
     private IConnectionManager _connectionManager = null!;
     private CsvExporter _csvExporter = null!;
+    private int _sortColumnIndex = -1;
+    private SortOrder _sortOrder = SortOrder.None;
 
     public override string ScreenTitle => _task?.Name ?? "Navigation Settings";
 
@@ -229,7 +232,7 @@ public class NavigationSettingsDetailScreen : BaseScreen
         _resultsGrid.Columns.Add("MMMatch", "Mega Menu Match");
         _resultsGrid.Columns.Add("Status", "Status");
 
-        // Adjust column widths
+        // Adjust column widths and enable sorting
         _resultsGrid.Columns["SourceSite"].FillWeight = 150;
         _resultsGrid.Columns["TargetSite"].FillWeight = 150;
         _resultsGrid.Columns["SourceHNav"].FillWeight = 70;
@@ -239,6 +242,12 @@ public class NavigationSettingsDetailScreen : BaseScreen
         _resultsGrid.Columns["TargetMM"].FillWeight = 70;
         _resultsGrid.Columns["MMMatch"].FillWeight = 70;
         _resultsGrid.Columns["Status"].FillWeight = 60;
+
+        foreach (DataGridViewColumn col in _resultsGrid.Columns)
+        {
+            col.SortMode = DataGridViewColumnSortMode.Programmatic;
+        }
+        _resultsGrid.ColumnHeaderMouseClick += ResultsGrid_ColumnHeaderMouseClick;
 
         resultsTab.Controls.Add(_resultsGrid);
         resultsTab.Controls.Add(resultsHeaderPanel);
@@ -393,6 +402,94 @@ public class NavigationSettingsDetailScreen : BaseScreen
         SetStatus($"Showing {items.Count} site comparison(s)");
     }
 
+    private void AddLiveResultRow(NavigationSettingsCompareItem item)
+    {
+        // Check if filter would exclude this item
+        var filter = _filterCombo.SelectedIndex;
+        var include = filter switch
+        {
+            1 => item.Status == NavigationSettingsStatus.Mismatch,
+            2 => item.Status == NavigationSettingsStatus.Match || item.Status == NavigationSettingsStatus.Applied,
+            3 => item.Status == NavigationSettingsStatus.Error || item.Status == NavigationSettingsStatus.Failed,
+            _ => true
+        };
+
+        if (include)
+        {
+            var rowIndex = _resultsGrid.Rows.Add(
+                item.SourceSiteUrl,
+                item.TargetSiteUrl,
+                item.SourceHorizontalQuickLaunch ? "Yes" : "No",
+                item.TargetHorizontalQuickLaunch ? "Yes" : "No",
+                item.HorizontalQuickLaunchMatches ? "Yes" : "No",
+                item.SourceMegaMenuEnabled ? "Yes" : "No",
+                item.TargetMegaMenuEnabled ? "Yes" : "No",
+                item.MegaMenuEnabledMatches ? "Yes" : "No",
+                item.StatusDescription
+            );
+
+            var row = _resultsGrid.Rows[rowIndex];
+            row.DefaultCellStyle.BackColor = item.Status switch
+            {
+                NavigationSettingsStatus.Match => Color.FromArgb(200, 255, 200),
+                NavigationSettingsStatus.Applied => Color.FromArgb(180, 220, 255),
+                NavigationSettingsStatus.Mismatch => Color.FromArgb(255, 255, 150),
+                NavigationSettingsStatus.Error => Color.FromArgb(255, 200, 200),
+                NavigationSettingsStatus.Failed => Color.FromArgb(255, 200, 200),
+                _ => SystemColors.Window
+            };
+
+            if (!item.HorizontalQuickLaunchMatches)
+            {
+                row.Cells["HNavMatch"].Style.BackColor = Color.FromArgb(255, 200, 200);
+            }
+            if (!item.MegaMenuEnabledMatches)
+            {
+                row.Cells["MMMatch"].Style.BackColor = Color.FromArgb(255, 200, 200);
+            }
+
+            // Auto-scroll to show the latest row
+            _resultsGrid.FirstDisplayedScrollingRowIndex = rowIndex;
+        }
+
+        // Update log and status with running count
+        if (_currentResult != null)
+        {
+            _logTextBox.Text = string.Join(Environment.NewLine, _currentResult.ExecutionLog);
+            _logTextBox.SelectionStart = _logTextBox.TextLength;
+            _logTextBox.ScrollToCaret();
+            SetStatus($"Processing... {_currentResult.TotalPairsProcessed} site(s) completed");
+        }
+    }
+
+    private void ResultsGrid_ColumnHeaderMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
+    {
+        var column = _resultsGrid.Columns[e.ColumnIndex];
+
+        // Toggle sort direction
+        if (e.ColumnIndex == _sortColumnIndex)
+        {
+            _sortOrder = _sortOrder == SortOrder.Ascending ? SortOrder.Descending : SortOrder.Ascending;
+        }
+        else
+        {
+            // Clear glyph on previous column
+            if (_sortColumnIndex >= 0 && _sortColumnIndex < _resultsGrid.Columns.Count)
+            {
+                _resultsGrid.Columns[_sortColumnIndex].HeaderCell.SortGlyphDirection = SortOrder.None;
+            }
+            _sortColumnIndex = e.ColumnIndex;
+            _sortOrder = SortOrder.Ascending;
+        }
+
+        var direction = _sortOrder == SortOrder.Ascending
+            ? ListSortDirection.Ascending
+            : ListSortDirection.Descending;
+
+        _resultsGrid.Sort(column, direction);
+        column.HeaderCell.SortGlyphDirection = _sortOrder;
+    }
+
     private void FilterCombo_SelectedIndexChanged(object? sender, EventArgs e)
     {
         if (_currentResult != null)
@@ -471,8 +568,10 @@ public class NavigationSettingsDetailScreen : BaseScreen
                 _connectionManager,
                 applyMode,
                 progress,
-                _cancellationTokenSource.Token);
+                _cancellationTokenSource.Token,
+                onSiteCompleted: item => BeginInvoke(() => AddLiveResultRow(item)));
 
+            // Final refresh to ensure filter/log are up to date
             DisplayResults(_currentResult);
 
             if (_currentResult.Success)

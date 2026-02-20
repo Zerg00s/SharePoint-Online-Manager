@@ -172,6 +172,17 @@ public class NavigationService : INavigationService
 
     public async Task NavigateToHomeAsync()
     {
+        // Check if the current screen allows navigation away (e.g., running task confirmation)
+        if (_navigationStack.Count > 1)
+        {
+            var topScreen = _navigationStack.Peek();
+            var canNavigate = await topScreen.OnNavigatingFromAsync();
+            if (!canNavigate)
+            {
+                return;
+            }
+        }
+
         // Pop all screens except the home screen
         while (_navigationStack.Count > 1)
         {

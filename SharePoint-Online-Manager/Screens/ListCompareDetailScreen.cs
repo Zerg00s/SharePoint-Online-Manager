@@ -19,6 +19,7 @@ public class ListCompareDetailScreen : BaseScreen
     private Button _deleteButton = null!;
     private DataGridView _resultsGrid = null!;
     private ListView _issuesList = null!;
+    private TextBox _issuesFilterTextBox = null!;
     private TextBox _logTextBox = null!;
     private TabControl _tabControl = null!;
     private ProgressBar _progressBar = null!;
@@ -272,6 +273,33 @@ public class ListCompareDetailScreen : BaseScreen
 
         // Issues Summary tab
         var issuesTab = new TabPage("Issues Summary");
+
+        // Filter panel at top of issues tab
+        var issuesFilterPanel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 35
+        };
+        var issuesFilterLabel = new Label
+        {
+            Text = "Filter:",
+            AutoSize = true,
+            Location = new Point(5, 10)
+        };
+        _issuesFilterTextBox = new TextBox
+        {
+            Location = new Point(50, 7),
+            Size = new Size(300, 23),
+            PlaceholderText = "Type to filter by URL..."
+        };
+        _issuesFilterTextBox.TextChanged += (s, e) =>
+        {
+            if (_currentResult != null)
+                DisplayIssuesSummary(_currentResult);
+        };
+        issuesFilterPanel.Controls.Add(issuesFilterLabel);
+        issuesFilterPanel.Controls.Add(_issuesFilterTextBox);
+
         _issuesList = new ListView
         {
             Dock = DockStyle.Fill,
@@ -285,8 +313,12 @@ public class ListCompareDetailScreen : BaseScreen
         _issuesList.Columns.Add("Source Only", 80);
         _issuesList.Columns.Add("Target Only", 80);
         _issuesList.Columns.Add("Error", 200);
+        _issuesList.ContextMenuStrip = CreateIssuesContextMenu();
+        EnableCellTextSelection(_issuesList);
+        EnableColumnSorting(_issuesList);
 
         issuesTab.Controls.Add(_issuesList);
+        issuesTab.Controls.Add(issuesFilterPanel);
 
         // Log tab
         var logTab = new TabPage("Execution Log");
@@ -441,7 +473,16 @@ public class ListCompareDetailScreen : BaseScreen
     {
         _issuesList.Items.Clear();
 
-        foreach (var site in result.GetSitesWithIssues())
+        var filterText = _issuesFilterTextBox?.Text?.Trim() ?? "";
+        var sites = result.GetSitesWithIssues();
+        if (!string.IsNullOrEmpty(filterText))
+        {
+            sites = sites.Where(s =>
+                s.SourceSiteUrl.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
+                s.TargetSiteUrl.Contains(filterText, StringComparison.OrdinalIgnoreCase));
+        }
+
+        foreach (var site in sites)
         {
             var item = new ListViewItem(site.SourceSiteUrl);
             item.SubItems.Add(site.TargetSiteUrl);
@@ -698,6 +739,236 @@ public class ListCompareDetailScreen : BaseScreen
         }
 
         return Task.FromResult(true);
+    }
+
+    /// <summary>
+    /// Creates a context menu for the Issues list with copy items and export option.
+    /// </summary>
+    private ContextMenuStrip CreateIssuesContextMenu()
+    {
+        var contextMenu = new ContextMenuStrip();
+
+        var copyCell = new ToolStripMenuItem("Copy Cell");
+        copyCell.Click += (s, e) =>
+        {
+            if (_issuesList.SelectedItems.Count > 0)
+            {
+                var point = _issuesList.PointToClient(Cursor.Position);
+                var hitTest = _issuesList.HitTest(point);
+                if (hitTest.SubItem != null)
+                {
+                    var text = hitTest.SubItem.Text;
+                    if (!string.IsNullOrEmpty(text))
+                    {
+                        Clipboard.SetText(text);
+                    }
+                }
+            }
+        };
+
+        var copyRow = new ToolStripMenuItem("Copy Row");
+        copyRow.Click += (s, e) =>
+        {
+            if (_issuesList.SelectedItems.Count > 0)
+            {
+                var item = _issuesList.SelectedItems[0];
+                var values = new List<string>();
+                for (int i = 0; i < item.SubItems.Count; i++)
+                {
+                    values.Add(item.SubItems[i].Text ?? "");
+                }
+                Clipboard.SetText(string.Join("\t", values));
+            }
+        };
+
+        var copyAllUrls = new ToolStripMenuItem("Copy All URLs");
+        copyAllUrls.Click += (s, e) =>
+        {
+            var urls = new List<string>();
+            foreach (ListViewItem item in _issuesList.Items)
+            {
+                for (int i = 0; i < Math.Min(2, item.SubItems.Count); i++)
+                {
+                    var text = item.SubItems[i].Text ?? "";
+                    if (text.StartsWith("http", StringComparison.OrdinalIgnoreCase) ||
+                        text.Contains(".sharepoint.com", StringComparison.OrdinalIgnoreCase))
+                    {
+                        urls.Add(text);
+                    }
+                }
+            }
+            if (urls.Count > 0)
+            {
+                Clipboard.SetText(string.Join(Environment.NewLine, urls));
+            }
+        };
+
+        var exportIssuesCsv = new ToolStripMenuItem("Export Issues to CSV");
+        exportIssuesCsv.Click += ExportIssuesToCsv_Click;
+
+        contextMenu.Items.Add(copyCell);
+        contextMenu.Items.Add(copyRow);
+        contextMenu.Items.Add(new ToolStripSeparator());
+        contextMenu.Items.Add(copyAllUrls);
+        contextMenu.Items.Add(new ToolStripSeparator());
+        contextMenu.Items.Add(exportIssuesCsv);
+
+        contextMenu.Opening += (s, e) =>
+        {
+            exportIssuesCsv.Enabled = _currentResult != null;
+        };
+
+        return contextMenu;
+    }
+
+    private void ExportIssuesToCsv_Click(object? sender, EventArgs e)
+    {
+        if (_currentResult == null)
+            return;
+
+        var answer = MessageBox.Show(
+            "Include matching lists from these sites?\n\n" +
+            "Yes = all lists from sites with issues\n" +
+            "No = only issue rows (Mismatch, Source Only, Target Only)",
+            "Export Issues",
+            MessageBoxButtons.YesNoCancel,
+            MessageBoxIcon.Question);
+
+        if (answer == DialogResult.Cancel)
+            return;
+
+        var issuesSites = _currentResult.GetSitesWithIssues().ToList();
+        IEnumerable<ListCompareItem> items;
+
+        if (answer == DialogResult.Yes)
+        {
+            items = issuesSites.SelectMany(s => s.ListComparisons);
+        }
+        else
+        {
+            items = issuesSites.SelectMany(s => s.ListComparisons)
+                .Where(c => c.Status == ListCompareStatus.Mismatch ||
+                            c.Status == ListCompareStatus.SourceOnly ||
+                            c.Status == ListCompareStatus.TargetOnly);
+        }
+
+        var safeName = SanitizeFileName(_task.Name);
+        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        var defaultFileName = $"{safeName}_Issues_{timestamp}.csv";
+
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "CSV Files (*.csv)|*.csv",
+            FileName = defaultFileName
+        };
+
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                _csvExporter.ExportListCompareItems(items, dialog.FileName);
+                SetStatus($"Exported issues to {dialog.FileName}");
+                OfferToOpenFile(dialog.FileName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Export failed: {ex.Message}", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Enables click-to-select text on ListView cells by showing a read-only TextBox overlay.
+    /// </summary>
+    private static void EnableCellTextSelection(ListView listView)
+    {
+        TextBox? activeEditor = null;
+
+        void DismissEditor()
+        {
+            var editor = activeEditor;
+            activeEditor = null;
+            if (editor != null && !editor.IsDisposed && !listView.IsDisposed)
+            {
+                listView.Controls.Remove(editor);
+                editor.Dispose();
+            }
+        }
+
+        listView.MouseClick += (s, e) =>
+        {
+            var hitTest = listView.HitTest(e.Location);
+            if (hitTest.SubItem == null || hitTest.Item == null)
+            {
+                DismissEditor();
+                return;
+            }
+
+            var text = hitTest.SubItem.Text;
+            if (string.IsNullOrEmpty(text))
+            {
+                DismissEditor();
+                return;
+            }
+
+            DismissEditor();
+
+            var bounds = hitTest.SubItem.Bounds;
+
+            activeEditor = new TextBox
+            {
+                Text = text,
+                ReadOnly = true,
+                BorderStyle = BorderStyle.FixedSingle,
+                Location = bounds.Location,
+                Size = new Size(Math.Max(bounds.Width, 100), bounds.Height),
+                Font = listView.Font,
+                BackColor = SystemColors.Info
+            };
+
+            activeEditor.SelectAll();
+
+            activeEditor.LostFocus += (_, _) => DismissEditor();
+            activeEditor.KeyDown += (_, ke) =>
+            {
+                if (ke.KeyCode == Keys.Escape || ke.KeyCode == Keys.Enter)
+                {
+                    DismissEditor();
+                    ke.Handled = true;
+                }
+            };
+
+            listView.Controls.Add(activeEditor);
+            activeEditor.Focus();
+        };
+
+        listView.ColumnWidthChanging += (s, e) => DismissEditor();
+    }
+
+    /// <summary>
+    /// Enables column-click sorting on a ListView.
+    /// </summary>
+    private static void EnableColumnSorting(ListView listView)
+    {
+        int sortColumn = -1;
+        SortOrder sortOrder = SortOrder.None;
+
+        listView.ColumnClick += (s, e) =>
+        {
+            if (e.Column == sortColumn)
+            {
+                sortOrder = sortOrder == SortOrder.Ascending ? SortOrder.Descending : SortOrder.Ascending;
+            }
+            else
+            {
+                sortColumn = e.Column;
+                sortOrder = SortOrder.Ascending;
+            }
+
+            listView.ListViewItemSorter = new ListViewColumnComparer(sortColumn, sortOrder);
+            listView.Sort();
+        };
     }
 
     private static string SanitizeFileName(string fileName)

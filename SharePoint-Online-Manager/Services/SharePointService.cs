@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
@@ -910,7 +911,8 @@ public class SharePointService : ISharePointService
         bool isLibrary,
         bool includeFolders = true,
         bool includeItems = true,
-        bool includeInherited = false)
+        bool includeInherited = false,
+        Action<int, int>? onPageScanned = null)
     {
         System.Diagnostics.Debug.WriteLine($"[SPOManager] GetItemPermissionsAsync - START");
         System.Diagnostics.Debug.WriteLine($"[SPOManager]   siteUrl: {siteUrl}");
@@ -930,9 +932,10 @@ public class SharePointService : ISharePointService
 
             var siteUri = new Uri(siteUrl);
 
-            // Fetch all items with HasUniqueRoleAssignments in $select, then filter client-side
-            // This approach is more reliable than server-side $filter which isn't always supported
-            var selectFields = "Id,HasUniqueRoleAssignments,FileRef,FileLeafRef,Title,FileSystemObjectType";
+            // HasUniqueRoleAssignments is NOT reliably returned by the REST API items endpoint.
+            // We use CSOM ProcessQuery (like Sharegate) to batch-check this property reliably.
+            var formDigest = await GetFormDigestValueAsync(baseUrl);
+            var selectFields = "Id,FileRef,FileLeafRef,Title,FileSystemObjectType";
             int lastId = 0;
             bool hasMore = true;
             int pageNumber = 0;
@@ -981,34 +984,40 @@ public class SharePointService : ISharePointService
                     break;
                 }
 
-                int itemCount = 0;
+                // Collect all items from this page
+                var pageItems = new List<(int Id, string FileRef, string FileName, int FsObjType)>();
                 foreach (var item in valueElement.EnumerateArray())
                 {
-                    itemCount++;
                     totalItemsScanned++;
                     var itemId = GetIntProperty(item, "Id");
                     lastId = itemId;
 
-                    // Check if item has unique permissions - filter client-side
-                    var hasUniquePerms = GetBoolProperty(item, "HasUniqueRoleAssignments");
-                    if (!hasUniquePerms)
+                    var fileRef = GetStringProperty(item, "FileRef");
+                    var fileName = GetStringProperty(item, "FileLeafRef");
+                    var fsObjType = GetIntProperty(item, "FileSystemObjectType");
+                    if (string.IsNullOrEmpty(fileName))
+                        fileName = GetStringProperty(item, "Title");
+
+                    pageItems.Add((itemId, fileRef, fileName, fsObjType));
+                }
+
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Page {pageNumber}: {pageItems.Count} items, lastId={lastId}");
+
+                // Use CSOM ProcessQuery to batch-check HasUniqueRoleAssignments.
+                // CSOM is more reliable than REST for detecting file-level unique permissions.
+                var allItemIds = pageItems.Select(pi => pi.Id).ToList();
+                var uniqueSet = await CheckUniquePermissionsCsomAsync(baseUrl, formDigest, listTitle, allItemIds);
+
+                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Page {pageNumber}: {uniqueSet.Count} items with unique permissions out of {pageItems.Count}");
+                foreach (var (itemId, fileRef, fileName, fsObjType) in pageItems)
+                {
+                    if (!uniqueSet.Contains(itemId))
                         continue;
 
                     itemsWithUniquePerms++;
-                    var fileRef = GetStringProperty(item, "FileRef");
-                    var fileName = GetStringProperty(item, "FileLeafRef");
-                    // FileSystemObjectType: 0 = file, 1 = folder
-                    var fsObjType = GetIntProperty(item, "FileSystemObjectType");
-
-                    // Use Title as fallback for list items without FileLeafRef
-                    if (string.IsNullOrEmpty(fileName))
-                    {
-                        fileName = GetStringProperty(item, "Title");
-                    }
-
                     var isFolder = fsObjType == 1;
 
-                    System.Diagnostics.Debug.WriteLine($"[SPOManager]     Item {itemId}: hasUnique={hasUniquePerms}, isFolder={isFolder}, name={fileName}");
+                    System.Diagnostics.Debug.WriteLine($"[SPOManager]     Item {itemId}: hasUnique=true, isFolder={isFolder}, name={fileName}");
 
                     // Skip based on options
                     if (isFolder && !includeFolders)
@@ -1042,7 +1051,6 @@ public class SharePointService : ISharePointService
 
                         System.Diagnostics.Debug.WriteLine($"[SPOManager]       Found {roleItems.Count} role assignments for item {itemId}");
 
-                        // Set the object path
                         foreach (var roleItem in roleItems)
                         {
                             roleItem.ObjectPath = fileRef;
@@ -1058,10 +1066,10 @@ public class SharePointService : ISharePointService
                     }
                 }
 
-                System.Diagnostics.Debug.WriteLine($"[SPOManager]   Page {pageNumber}: {itemCount} items, lastId={lastId}");
+                onPageScanned?.Invoke(totalItemsScanned, itemsWithUniquePerms);
 
                 // If we got fewer than 5000 items, we've reached the end
-                hasMore = itemCount == 5000;
+                hasMore = pageItems.Count == 5000;
             }
 
             System.Diagnostics.Debug.WriteLine($"[SPOManager] GetItemPermissionsAsync - END");
@@ -1085,6 +1093,228 @@ public class SharePointService : ISharePointService
                 ErrorMessage = ex.Message
             };
         }
+    }
+
+    /// <summary>
+    /// Gets a form digest value needed for CSOM POST requests.
+    /// </summary>
+    private async Task<string?> GetFormDigestValueAsync(string baseUrl)
+    {
+        Trace.WriteLine($"[SPOManager] CSOM: Getting form digest from {baseUrl}/_api/contextinfo");
+        var digestUrl = $"{baseUrl}/_api/contextinfo";
+        var digestResponse = await _client.PostAsync(digestUrl, new StringContent(""));
+
+        if (!digestResponse.IsSuccessStatusCode)
+        {
+            Trace.WriteLine($"[SPOManager] CSOM: GetFormDigest FAILED HTTP {(int)digestResponse.StatusCode}");
+            return null;
+        }
+
+        var digestJson = await digestResponse.Content.ReadAsStringAsync();
+        using var digestDoc = JsonDocument.Parse(digestJson);
+
+        var formDigestValue = GetStringProperty(digestDoc.RootElement, "FormDigestValue");
+        if (string.IsNullOrEmpty(formDigestValue) &&
+            digestDoc.RootElement.TryGetProperty("d", out var dElement) &&
+            dElement.TryGetProperty("GetContextWebInformation", out var webInfo))
+        {
+            formDigestValue = GetStringProperty(webInfo, "FormDigestValue");
+        }
+
+        Trace.WriteLine($"[SPOManager] CSOM: Got form digest: {(string.IsNullOrEmpty(formDigestValue) ? "EMPTY!" : formDigestValue![..Math.Min(30, formDigestValue.Length)] + "...")}");
+        return formDigestValue;
+    }
+
+    /// <summary>
+    /// Uses CSOM ProcessQuery to batch-check HasUniqueRoleAssignments for a list of item IDs.
+    /// This is more reliable than the REST API for detecting file-level unique permissions.
+    /// </summary>
+    private async Task<HashSet<int>> CheckUniquePermissionsCsomAsync(
+        string baseUrl, string? formDigest, string listTitle, List<int> itemIds)
+    {
+        var uniqueIds = new HashSet<int>();
+        if (itemIds.Count == 0) return uniqueIds;
+
+        Trace.WriteLine($"[SPOManager] CSOM: Checking HasUniqueRoleAssignments for {itemIds.Count} items in '{listTitle}'");
+
+        const int batchSize = 200;
+        int batchNum = 0;
+        for (int batchStart = 0; batchStart < itemIds.Count; batchStart += batchSize)
+        {
+            batchNum++;
+            var batch = itemIds.Skip(batchStart).Take(batchSize).ToList();
+
+            Trace.WriteLine($"[SPOManager] CSOM: Batch {batchNum} — {batch.Count} items (IDs {batch.First()}..{batch.Last()})");
+
+            var xml = BuildCsomHasUniquePermissionsXml(listTitle, batch);
+            var csomUrl = $"{baseUrl}/_vti_bin/client.svc/ProcessQuery";
+
+            Trace.WriteLine($"[SPOManager] CSOM: POST {csomUrl}");
+            Trace.WriteLine($"[SPOManager] CSOM: Request XML ({xml.Length} chars): {xml[..Math.Min(500, xml.Length)]}...");
+
+            var request = new HttpRequestMessage(HttpMethod.Post, csomUrl);
+            request.Content = new StringContent(xml, System.Text.Encoding.UTF8, "text/xml");
+            if (!string.IsNullOrEmpty(formDigest))
+                request.Headers.Add("X-RequestDigest", formDigest);
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await _client.SendAsync(request);
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine($"[SPOManager] CSOM: ProcessQuery EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+                continue;
+            }
+
+            Trace.WriteLine($"[SPOManager] CSOM: Response HTTP {(int)response.StatusCode} {response.StatusCode}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Trace.WriteLine($"[SPOManager] CSOM: ERROR body: {errorBody[..Math.Min(1000, errorBody.Length)]}");
+                continue;
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            Trace.WriteLine($"[SPOManager] CSOM: Response JSON ({json.Length} chars): {json[..Math.Min(2000, json.Length)]}");
+
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                var arrayLen = root.GetArrayLength();
+
+                Trace.WriteLine($"[SPOManager] CSOM: Response array has {arrayLen} elements");
+
+                if (arrayLen == 0)
+                {
+                    Trace.WriteLine($"[SPOManager] CSOM: Empty response array — skipping batch");
+                    continue;
+                }
+
+                // Check header for errors
+                var header = root[0];
+                Trace.WriteLine($"[SPOManager] CSOM: Header: {header}");
+
+                if (header.TryGetProperty("ErrorInfo", out var errorInfo) &&
+                    errorInfo.ValueKind != JsonValueKind.Null)
+                {
+                    var errorMsg = errorInfo.TryGetProperty("ErrorMessage", out var em) ? em.GetString() : "unknown";
+                    var errorCode = errorInfo.TryGetProperty("ErrorCode", out var ec) ? ec.GetInt32().ToString() : "?";
+                    var errorType = errorInfo.TryGetProperty("ErrorTypeName", out var et) ? et.GetString() : "?";
+                    Trace.WriteLine($"[SPOManager] CSOM: BATCH ERROR: [{errorCode}] {errorType}: {errorMsg}");
+                    continue;
+                }
+
+                // Parse results: array has [header, actionId, resultObj, actionId, resultObj, ...]
+                // Our Query action IDs are 2000+batchIndex → maps to batch[batchIndex]
+                int uniqueInBatch = 0;
+                int queriesFound = 0;
+                for (int i = 1; i < arrayLen - 1; i++)
+                {
+                    var element = root[i];
+                    if (element.ValueKind == JsonValueKind.Number)
+                    {
+                        int actionId = element.GetInt32();
+
+                        if (i + 1 < arrayLen)
+                        {
+                            i++;
+                            var resultObj = root[i];
+
+                            // Only process our Query actions (IDs 2000+)
+                            int batchIndex = actionId - 2000;
+                            if (batchIndex >= 0 && batchIndex < batch.Count)
+                            {
+                                queriesFound++;
+                                bool hasUnique = resultObj.ValueKind == JsonValueKind.Object &&
+                                    resultObj.TryGetProperty("HasUniqueRoleAssignments", out var hasUniqueProp) &&
+                                    hasUniqueProp.ValueKind == JsonValueKind.True;
+
+                                if (hasUnique)
+                                {
+                                    uniqueInBatch++;
+                                    uniqueIds.Add(batch[batchIndex]);
+                                    Trace.WriteLine($"[SPOManager] CSOM:   Item ID {batch[batchIndex]} → HasUniqueRoleAssignments=TRUE");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Trace.WriteLine($"[SPOManager] CSOM: Batch {batchNum} done — {queriesFound} queries parsed, {uniqueInBatch} items with unique perms");
+                if (queriesFound != batch.Count)
+                    Trace.WriteLine($"[SPOManager] CSOM: WARNING — expected {batch.Count} query results but found {queriesFound}");
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine($"[SPOManager] CSOM: PARSE EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+                Trace.WriteLine($"[SPOManager] CSOM: Raw JSON: {json[..Math.Min(2000, json.Length)]}");
+            }
+        }
+
+        Trace.WriteLine($"[SPOManager] CSOM: TOTAL — {uniqueIds.Count} items with unique permissions out of {itemIds.Count}");
+        return uniqueIds;
+    }
+
+    /// <summary>
+    /// Builds CSOM XML to batch-check HasUniqueRoleAssignments for multiple items.
+    /// </summary>
+    private static string BuildCsomHasUniquePermissionsXml(string listTitle, List<int> itemIds)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("<Request xmlns=\"http://schemas.microsoft.com/sharepoint/clientquery/2009\" SchemaVersion=\"15.0.0.0\" LibraryVersion=\"16.0.0.0\" ApplicationName=\"SPOManager\">");
+
+        // Actions
+        sb.Append("<Actions>");
+        sb.Append("<ObjectPath Id=\"1\" ObjectPathId=\"10\" />");
+        sb.Append("<ObjectPath Id=\"2\" ObjectPathId=\"20\" />");
+        sb.Append("<ObjectPath Id=\"3\" ObjectPathId=\"30\" />");
+        sb.Append("<ObjectPath Id=\"4\" ObjectPathId=\"40\" />");
+
+        for (int i = 0; i < itemIds.Count; i++)
+        {
+            int objectPathId = 1000 + i;
+            int actionId = 100 + i;
+            int queryId = 2000 + i;
+
+            sb.Append($"<ObjectPath Id=\"{actionId}\" ObjectPathId=\"{objectPathId}\" />");
+            sb.Append($"<Query Id=\"{queryId}\" ObjectPathId=\"{objectPathId}\">");
+            sb.Append("<Query SelectAllProperties=\"false\">");
+            sb.Append("<Properties>");
+            sb.Append("<Property Name=\"HasUniqueRoleAssignments\" ScalarProperty=\"true\" />");
+            sb.Append("</Properties>");
+            sb.Append("</Query>");
+            sb.Append("</Query>");
+        }
+
+        sb.Append("</Actions>");
+
+        // ObjectPaths
+        sb.Append("<ObjectPaths>");
+        sb.Append("<StaticProperty Id=\"10\" TypeId=\"{3747adcd-a3c3-41b9-bfab-4a64dd2f1e0a}\" Name=\"Current\" />");
+        sb.Append("<Property Id=\"20\" ParentId=\"10\" Name=\"Web\" />");
+        sb.Append("<Property Id=\"30\" ParentId=\"20\" Name=\"Lists\" />");
+
+        var escapedTitle = System.Security.SecurityElement.Escape(listTitle);
+        sb.Append($"<Method Id=\"40\" ParentId=\"30\" Name=\"GetByTitle\">");
+        sb.Append($"<Parameters><Parameter Type=\"String\">{escapedTitle}</Parameter></Parameters>");
+        sb.Append("</Method>");
+
+        for (int i = 0; i < itemIds.Count; i++)
+        {
+            int objectPathId = 1000 + i;
+            sb.Append($"<Method Id=\"{objectPathId}\" ParentId=\"40\" Name=\"GetItemById\">");
+            sb.Append($"<Parameters><Parameter Type=\"Number\">{itemIds[i]}</Parameter></Parameters>");
+            sb.Append("</Method>");
+        }
+
+        sb.Append("</ObjectPaths>");
+        sb.Append("</Request>");
+
+        return sb.ToString();
     }
 
     private static SharePointResultStatus GetSharePointStatus(HttpStatusCode code) => code switch

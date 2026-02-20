@@ -1,4 +1,5 @@
 using SharePointOnlineManager.Forms;
+using SharePointOnlineManager.Forms.Dialogs;
 using SharePointOnlineManager.Models;
 using SharePointOnlineManager.Navigation;
 using SharePointOnlineManager.Services;
@@ -1280,20 +1281,29 @@ public class DocumentCompareDetailScreen : BaseScreen
         var exportSiteCsv = new ToolStripMenuItem("Export Site to CSV");
         exportSiteCsv.Click += ExportSiteToCsv_Click;
 
+        var previewIssues = new ToolStripMenuItem("Preview Issues");
+        previewIssues.Click += (s, e) => PreviewSiteIssues(_sitesDetailList);
+
         contextMenu.Items.Add(copyCell);
         contextMenu.Items.Add(copyRow);
         contextMenu.Items.Add(new ToolStripSeparator());
         contextMenu.Items.Add(copyAllUrls);
         contextMenu.Items.Add(new ToolStripSeparator());
         contextMenu.Items.Add(exportSiteCsv);
+        contextMenu.Items.Add(previewIssues);
 
-        // Enable/disable export based on selection
+        // Enable/disable items based on selection
         contextMenu.Opening += (s, e) =>
         {
             var hasSelection = _sitesDetailList.SelectedItems.Count > 0;
             var isNotTotalsRow = hasSelection &&
                 _sitesDetailList.SelectedItems[0].Text != "TOTALS";
             exportSiteCsv.Enabled = hasSelection && isNotTotalsRow && _currentResult != null;
+
+            var siteResult = hasSelection && isNotTotalsRow && _currentResult != null
+                ? FindSiteResult(_sitesDetailList.SelectedItems[0].Text)
+                : null;
+            previewIssues.Enabled = siteResult != null && siteResult.HasIssues;
         };
 
         return contextMenu;
@@ -1361,6 +1371,9 @@ public class DocumentCompareDetailScreen : BaseScreen
             }
         };
 
+        var previewIssues = new ToolStripMenuItem("Preview Issues");
+        previewIssues.Click += (s, e) => PreviewSiteIssues(_issuesList);
+
         var exportIssuesCsv = new ToolStripMenuItem("Export Issues to CSV");
         exportIssuesCsv.Click += ExportIssuesToCsv_Click;
 
@@ -1369,14 +1382,40 @@ public class DocumentCompareDetailScreen : BaseScreen
         contextMenu.Items.Add(new ToolStripSeparator());
         contextMenu.Items.Add(copyAllUrls);
         contextMenu.Items.Add(new ToolStripSeparator());
+        contextMenu.Items.Add(previewIssues);
         contextMenu.Items.Add(exportIssuesCsv);
 
         contextMenu.Opening += (s, e) =>
         {
+            var hasSelection = _issuesList.SelectedItems.Count > 0;
+            previewIssues.Enabled = hasSelection && _currentResult != null;
             exportIssuesCsv.Enabled = _currentResult != null;
         };
 
         return contextMenu;
+    }
+
+    private SiteDocumentCompareResult? FindSiteResult(string sourceUrl)
+    {
+        return _currentResult?.SiteResults.FirstOrDefault(
+            s => s.SourceSiteUrl.Equals(sourceUrl, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void PreviewSiteIssues(ListView listView)
+    {
+        if (listView.SelectedItems.Count == 0 || _currentResult == null)
+            return;
+
+        var sourceUrl = listView.SelectedItems[0].Text;
+        if (sourceUrl == "TOTALS")
+            return;
+
+        var siteResult = FindSiteResult(sourceUrl);
+        if (siteResult == null || !siteResult.HasIssues)
+            return;
+
+        using var dialog = new IssuesPreviewDialog(siteResult, _csvExporter);
+        dialog.ShowDialog(FindForm());
     }
 
     private void ExportIssuesToCsv_Click(object? sender, EventArgs e)
