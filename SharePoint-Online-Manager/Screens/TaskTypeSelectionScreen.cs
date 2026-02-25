@@ -177,6 +177,11 @@ public class TaskTypeSelectionScreen : BaseScreen
         TaskType.NavigationSettingsSync => "\U0001F517", // link emoji (navigation)
         TaskType.DocumentCompare => "\U0001F4C4", // page emoji (documents)
         TaskType.SiteAccessCheck => "\U0001F511", // key emoji (access)
+        TaskType.AdHocUsersReport => "\U0001F465", // busts in silhouette emoji (guest users)
+        TaskType.CustomizedListsReport => "\U0001F527", // wrench emoji (customization)
+        TaskType.PublishingSitesReport => "\U0001F4F0", // newspaper emoji (publishing)
+        TaskType.CustomFieldsReport => "\U0001F4DD", // memo emoji (custom fields)
+        TaskType.SubsitesReport => "\U0001F3D7", // building construction emoji (subsites)
         _ => "\U0001F4C4" // page emoji
     };
 
@@ -246,6 +251,26 @@ public class TaskTypeSelectionScreen : BaseScreen
             else if (taskType == TaskType.SetSiteState)
             {
                 await NavigationService!.NavigateToAsync<SetSiteStateDetailScreen>(task);
+            }
+            else if (taskType == TaskType.AdHocUsersReport)
+            {
+                await NavigationService!.NavigateToAsync<AdHocUsersDetailScreen>(task);
+            }
+            else if (taskType == TaskType.CustomizedListsReport)
+            {
+                await NavigationService!.NavigateToAsync<CustomizedListsDetailScreen>(task);
+            }
+            else if (taskType == TaskType.PublishingSitesReport)
+            {
+                await NavigationService!.NavigateToAsync<PublishingSitesDetailScreen>(task);
+            }
+            else if (taskType == TaskType.CustomFieldsReport)
+            {
+                await NavigationService!.NavigateToAsync<CustomFieldsDetailScreen>(task);
+            }
+            else if (taskType == TaskType.SubsitesReport)
+            {
+                await NavigationService!.NavigateToAsync<SubsitesReportDetailScreen>(task);
             }
             else
             {

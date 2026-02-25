@@ -388,6 +388,26 @@ public class TaskListScreen : BaseScreen
         {
             await NavigationService!.NavigateToAsync<SiteAccessDetailScreen>(task);
         }
+        else if (task.Type == TaskType.AdHocUsersReport)
+        {
+            await NavigationService!.NavigateToAsync<AdHocUsersDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.CustomizedListsReport)
+        {
+            await NavigationService!.NavigateToAsync<CustomizedListsDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.PublishingSitesReport)
+        {
+            await NavigationService!.NavigateToAsync<PublishingSitesDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.CustomFieldsReport)
+        {
+            await NavigationService!.NavigateToAsync<CustomFieldsDetailScreen>(task);
+        }
+        else if (task.Type == TaskType.SubsitesReport)
+        {
+            await NavigationService!.NavigateToAsync<SubsitesReportDetailScreen>(task);
+        }
         else
         {
             await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
@@ -443,6 +463,26 @@ public class TaskListScreen : BaseScreen
         else if (task.Type == TaskType.SiteAccessCheck)
         {
             await NavigationService!.NavigateToAsync<SiteAccessDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.AdHocUsersReport)
+        {
+            await NavigationService!.NavigateToAsync<AdHocUsersDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.CustomizedListsReport)
+        {
+            await NavigationService!.NavigateToAsync<CustomizedListsDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.PublishingSitesReport)
+        {
+            await NavigationService!.NavigateToAsync<PublishingSitesDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.CustomFieldsReport)
+        {
+            await NavigationService!.NavigateToAsync<CustomFieldsDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.SubsitesReport)
+        {
+            await NavigationService!.NavigateToAsync<SubsitesReportDetailScreen>(execParam);
         }
         else
         {

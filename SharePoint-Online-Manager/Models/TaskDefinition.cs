@@ -53,7 +53,32 @@ public enum TaskType
     /// <summary>
     /// Check site access for source and target accounts to identify permission issues.
     /// </summary>
-    SiteAccessCheck
+    SiteAccessCheck,
+
+    /// <summary>
+    /// Report on external ad hoc (OTP) guest users across selected site collections.
+    /// </summary>
+    AdHocUsersReport,
+
+    /// <summary>
+    /// Find lists customized with Power Apps or SPFx forms across selected site collections.
+    /// </summary>
+    CustomizedListsReport,
+
+    /// <summary>
+    /// Find sites where SharePoint Publishing features are activated.
+    /// </summary>
+    PublishingSitesReport,
+
+    /// <summary>
+    /// Report on custom (non-OOTB) fields across lists and libraries.
+    /// </summary>
+    CustomFieldsReport,
+
+    /// <summary>
+    /// Report on site collections that have subsites.
+    /// </summary>
+    SubsitesReport
 }
 
 /// <summary>
@@ -101,6 +126,11 @@ public class TaskDefinition
         TaskType.NavigationSettingsSync => "Navigation Settings",
         TaskType.DocumentCompare => "Document Compare",
         TaskType.SiteAccessCheck => "Site Access Check",
+        TaskType.AdHocUsersReport => "Ad Hoc Users Report",
+        TaskType.CustomizedListsReport => "Customized Lists Report",
+        TaskType.PublishingSitesReport => "Publishing Sites Report",
+        TaskType.CustomFieldsReport => "Custom Fields Report",
+        TaskType.SubsitesReport => "Subsites Report",
         _ => Type.ToString()
     };
 
@@ -138,6 +168,11 @@ public static class TaskTypeExtensions
         TaskType.NavigationSettingsSync => "Compare and sync navigation settings between tenants",
         TaskType.DocumentCompare => "Compare documents between source and target sites",
         TaskType.SiteAccessCheck => "Check site access for source and target accounts",
+        TaskType.AdHocUsersReport => "Report on external ad hoc (OTP) guest users across sites",
+        TaskType.CustomizedListsReport => "Find lists customized with Power Apps or SPFx forms",
+        TaskType.PublishingSitesReport => "Find sites with SharePoint Publishing features activated",
+        TaskType.CustomFieldsReport => "Report on custom (non-OOTB) fields across lists and libraries",
+        TaskType.SubsitesReport => "Report on site collections that have one or more subsites",
         _ => type.ToString()
     };
 
@@ -156,6 +191,11 @@ public static class TaskTypeExtensions
         TaskType.NavigationSettingsSync => "Navigation Settings Sync",
         TaskType.DocumentCompare => "Document Compare",
         TaskType.SiteAccessCheck => "Site Access Check",
+        TaskType.AdHocUsersReport => "Ad Hoc Users Report",
+        TaskType.CustomizedListsReport => "Customized Lists Report",
+        TaskType.PublishingSitesReport => "Publishing Sites Report",
+        TaskType.CustomFieldsReport => "Custom Fields Report",
+        TaskType.SubsitesReport => "Subsites Report",
         _ => type.ToString()
     };
 

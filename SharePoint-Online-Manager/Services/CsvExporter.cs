@@ -346,6 +346,216 @@ public class CsvExporter
     }
 
     /// <summary>
+    /// Exports customized lists report results to a CSV file.
+    /// </summary>
+    public void ExportCustomizedListsReport(CustomizedListsReportResult result, string filePath, bool customizedOnly = false)
+    {
+        var lists = customizedOnly ? result.GetCustomizedLists() : result.GetAllLists();
+        var items = lists.Select(l => new CustomizedListsExportItem
+        {
+            SiteUrl = l.SiteUrl,
+            SiteTitle = l.SiteTitle,
+            ListTitle = l.ListTitle,
+            ListType = l.ListType,
+            FormType = l.FormTypeDescription,
+            ItemCount = l.ItemCount,
+            ListUrl = l.ListUrl,
+            DefaultNewFormUrl = l.DefaultNewFormUrl,
+            DefaultEditFormUrl = l.DefaultEditFormUrl,
+            SpfxNewFormComponentId = l.SpfxNewFormComponentId,
+            SpfxEditFormComponentId = l.SpfxEditFormComponentId,
+            SpfxDisplayFormComponentId = l.SpfxDisplayFormComponentId
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports customized lists report site summary to a CSV file.
+    /// </summary>
+    public void ExportCustomizedListsReportSummary(CustomizedListsReportResult result, string filePath)
+    {
+        var items = result.SiteResults.Select(s => new CustomizedListsSiteSummaryExportItem
+        {
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            TotalLists = s.TotalLists,
+            CustomizedCount = s.CustomizedCount,
+            PowerAppsCount = s.PowerAppsCount,
+            SpfxCount = s.SpfxCount,
+            Status = s.Success ? "Success" : "Failed",
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports ad hoc users report results to a CSV file.
+    /// </summary>
+    public void ExportAdHocUsersReport(AdHocUsersReportResult result, string filePath)
+    {
+        var items = result.GetAllUsers().Select(u => new AdHocUsersExportItem
+        {
+            SiteUrl = u.SiteUrl,
+            SiteTitle = u.SiteTitle,
+            LoginName = u.LoginName,
+            Title = u.Title,
+            Email = u.Email,
+            Id = u.Id,
+            IsSiteAdmin = u.IsSiteAdmin ? "Yes" : "No",
+            PrincipalType = u.PrincipalType
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports ad hoc users report site summary to a CSV file.
+    /// </summary>
+    public void ExportAdHocUsersReportSummary(AdHocUsersReportResult result, string filePath)
+    {
+        var items = result.SiteResults.Select(s => new AdHocUsersSiteSummaryExportItem
+        {
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            GuestCount = s.GuestCount,
+            Status = s.Success ? "Success" : "Failed",
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports custom fields report results to a CSV file.
+    /// </summary>
+    public void ExportCustomFieldsReport(CustomFieldsReportResult result, string filePath)
+    {
+        var items = result.GetAllFields().Select(f => new CustomFieldsExportItem
+        {
+            SiteCollectionUrl = f.SiteCollectionUrl,
+            SiteUrl = f.SiteUrl,
+            SiteTitle = f.SiteTitle,
+            ListTitle = f.ListTitle,
+            ListUrl = f.ListUrl,
+            ItemCount = f.ItemCount,
+            ColumnName = f.ColumnName,
+            InternalName = f.InternalName,
+            FieldType = f.FieldType,
+            Group = f.Group,
+            ListCreated = f.ListCreated,
+            ListModified = f.ListModified
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports custom fields report site summary to a CSV file.
+    /// </summary>
+    public void ExportCustomFieldsReportSummary(CustomFieldsReportResult result, string filePath)
+    {
+        var items = result.SiteResults.Select(s => new CustomFieldsSiteSummaryExportItem
+        {
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            ListsScanned = s.ListsScanned,
+            ListsWithCustomFields = s.ListsWithCustomFields,
+            CustomFieldCount = s.CustomFieldCount,
+            Status = s.Success ? "Success" : "Failed",
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports all subsites from the subsites report to a CSV file.
+    /// </summary>
+    public void ExportSubsitesReport(SubsitesReportResult result, string filePath)
+    {
+        var items = result.GetAllSubsites().Select(s => new SubsiteExportItem
+        {
+            SiteCollectionUrl = s.SiteCollectionUrl,
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            SubsiteUrl = s.SubsiteUrl,
+            SubsiteTitle = s.SubsiteTitle,
+            WebTemplate = s.WebTemplate,
+            Created = s.Created,
+            LastModified = s.LastModified,
+            Language = s.LanguageDisplay
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports subsites report site summary to a CSV file (sites with subsite counts).
+    /// </summary>
+    public void ExportSubsitesReportSummary(SubsitesReportResult result, string filePath, bool withSubsitesOnly = false)
+    {
+        var sites = withSubsitesOnly
+            ? result.SiteResults.Where(s => s.Success && s.HasSubsites)
+            : result.SiteResults.AsEnumerable();
+
+        var items = sites.Select(s => new SubsitesSiteSummaryExportItem
+        {
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            SubsiteCount = s.SubsiteCount,
+            HasSubsites = s.HasSubsites ? "Yes" : "No",
+            Status = s.Success ? "Success" : "Failed",
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports publishing sites report results to a CSV file.
+    /// </summary>
+    public void ExportPublishingSitesReport(PublishingSitesReportResult result, string filePath, bool publishingOnly = false)
+    {
+        var sites = publishingOnly
+            ? result.SiteResults.Where(s => s.Success && s.HasPublishing)
+            : result.SiteResults.AsEnumerable();
+
+        var items = sites.Select(s => new PublishingSitesExportItem
+        {
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            PublishingInfrastructure = s.HasPublishingInfrastructure ? "Yes" : "No",
+            PublishingWeb = s.HasPublishingWeb ? "Yes" : "No",
+            PublishingStatus = s.PublishingStatus,
+            Status = s.Success ? "Success" : "Failed",
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports publishing sites report site summary to a CSV file.
+    /// </summary>
+    public void ExportPublishingSitesReportSummary(PublishingSitesReportResult result, string filePath)
+    {
+        var items = result.SiteResults.Select(s => new PublishingSitesExportItem
+        {
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            PublishingInfrastructure = s.HasPublishingInfrastructure ? "Yes" : "No",
+            PublishingWeb = s.HasPublishingWeb ? "Yes" : "No",
+            PublishingStatus = s.PublishingStatus,
+            Status = s.Success ? "Success" : "Failed",
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
     /// Exports site access check results to a CSV file.
     /// </summary>
     public void ExportSiteAccessReport(SiteAccessResult result, string filePath, bool sourceOnly = false, bool targetOnly = false, bool issuesOnly = false)

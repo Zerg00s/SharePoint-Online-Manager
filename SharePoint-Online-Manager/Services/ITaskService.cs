@@ -181,6 +181,126 @@ public interface ITaskService
     Task SaveDocumentCompareResultAsync(DocumentCompareResult result);
 
     /// <summary>
+    /// Executes an ad hoc users report task and returns the results.
+    /// </summary>
+    Task<AdHocUsersReportResult> ExecuteAdHocUsersReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all ad hoc users report results for a task.
+    /// </summary>
+    Task<List<AdHocUsersReportResult>> GetAdHocUsersReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent ad hoc users report result for a task.
+    /// </summary>
+    Task<AdHocUsersReportResult?> GetLatestAdHocUsersReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves an ad hoc users report result.
+    /// </summary>
+    Task SaveAdHocUsersReportResultAsync(AdHocUsersReportResult result);
+
+    /// <summary>
+    /// Executes a publishing sites report task and returns the results.
+    /// </summary>
+    Task<PublishingSitesReportResult> ExecutePublishingSitesReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all publishing sites report results for a task.
+    /// </summary>
+    Task<List<PublishingSitesReportResult>> GetPublishingSitesReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent publishing sites report result for a task.
+    /// </summary>
+    Task<PublishingSitesReportResult?> GetLatestPublishingSitesReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a publishing sites report result.
+    /// </summary>
+    Task SavePublishingSitesReportResultAsync(PublishingSitesReportResult result);
+
+    /// <summary>
+    /// Executes a customized lists report task and returns the results.
+    /// </summary>
+    Task<CustomizedListsReportResult> ExecuteCustomizedListsReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all customized lists report results for a task.
+    /// </summary>
+    Task<List<CustomizedListsReportResult>> GetCustomizedListsReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent customized lists report result for a task.
+    /// </summary>
+    Task<CustomizedListsReportResult?> GetLatestCustomizedListsReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a customized lists report result.
+    /// </summary>
+    Task SaveCustomizedListsReportResultAsync(CustomizedListsReportResult result);
+
+    /// <summary>
+    /// Executes a custom fields report task and returns the results.
+    /// </summary>
+    Task<CustomFieldsReportResult> ExecuteCustomFieldsReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all custom fields report results for a task.
+    /// </summary>
+    Task<List<CustomFieldsReportResult>> GetCustomFieldsReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent custom fields report result for a task.
+    /// </summary>
+    Task<CustomFieldsReportResult?> GetLatestCustomFieldsReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a custom fields report result.
+    /// </summary>
+    Task SaveCustomFieldsReportResultAsync(CustomFieldsReportResult result);
+
+    /// <summary>
+    /// Executes a subsites report task and returns the results.
+    /// </summary>
+    Task<SubsitesReportResult> ExecuteSubsitesReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all subsites report results for a task.
+    /// </summary>
+    Task<List<SubsitesReportResult>> GetSubsitesReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent subsites report result for a task.
+    /// </summary>
+    Task<SubsitesReportResult?> GetLatestSubsitesReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a subsites report result.
+    /// </summary>
+    Task SaveSubsitesReportResultAsync(SubsitesReportResult result);
+
+    /// <summary>
     /// Executes a site access check task and returns the results.
     /// </summary>
     Task<SiteAccessResult> ExecuteSiteAccessCheckAsync(

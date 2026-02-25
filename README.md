@@ -2,9 +2,9 @@
 
 ## Commands
 
-**Build:**
+**Build a release and digitally sign the executable:**
 ```bash
-dotnet build
+.\Sign-App.ps1
 ```
 
 **Run:**

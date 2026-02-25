@@ -20,3 +20,6 @@ Thumbs.db
 
 Site Compare small Batch.csv
 Site Compare Batch.csv
+
+# Signing metadata (contains Azure account details)
+signing-metadata.json

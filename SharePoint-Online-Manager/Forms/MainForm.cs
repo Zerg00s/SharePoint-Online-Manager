@@ -219,8 +219,9 @@ public partial class MainForm : Form
             "SharePoint Online Manager\n\n" +
             "Version 1.0\n\n" +
             "A tool for managing SharePoint Online sites and running reports.\n\n" +
+            "CleverPoint Solutions Incorporated\n" +
             "Developed by Denis Molodtsov\n" +
-            "\u00A9 2026 All Rights Reserved",
+            "\u00A9 2026 CleverPoint Solutions Incorporated. All Rights Reserved.",
             "About SharePoint Online Manager",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);

@@ -675,6 +675,757 @@ public class SharePointService : ISharePointService
         return subsites;
     }
 
+    #region Subsites Report Methods
+
+    public async Task<SharePointResult<List<SubsiteReportItem>>> GetSubsitesForReportAsync(
+        string siteUrl, string siteCollectionUrl)
+    {
+        try
+        {
+            var baseUrl = siteUrl.TrimEnd('/');
+            var apiUrl = $"{baseUrl}/_api/web/webs?$select=Title,Url,ServerRelativeUrl,WebTemplate,Created,LastItemModifiedDate,Language";
+            var response = await _client.GetAsync(apiUrl);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                return new SharePointResult<List<SubsiteReportItem>>
+                {
+                    Status = response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                        ? SharePointResultStatus.AuthenticationRequired
+                        : SharePointResultStatus.AccessDenied,
+                    ErrorMessage = $"HTTP {(int)response.StatusCode}"
+                };
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new SharePointResult<List<SubsiteReportItem>>
+                {
+                    Status = SharePointResultStatus.Error,
+                    ErrorMessage = $"HTTP {(int)response.StatusCode}"
+                };
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            JsonElement valueElement;
+            if (root.TryGetProperty("value", out valueElement))
+            {
+                // Standard OData
+            }
+            else if (root.TryGetProperty("d", out var dElement) &&
+                     dElement.TryGetProperty("results", out valueElement))
+            {
+                // OData verbose
+            }
+            else
+            {
+                return new SharePointResult<List<SubsiteReportItem>>
+                {
+                    Data = [],
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            // Get site title
+            var siteTitle = "";
+            try
+            {
+                var webUrl = $"{baseUrl}/_api/web?$select=Title";
+                var webResponse = await _client.GetAsync(webUrl);
+                if (webResponse.IsSuccessStatusCode)
+                {
+                    var webJson = await webResponse.Content.ReadAsStringAsync();
+                    using var webDoc = JsonDocument.Parse(webJson);
+                    var webRoot = webDoc.RootElement;
+                    if (webRoot.TryGetProperty("d", out var dWeb))
+                        siteTitle = GetStringProperty(dWeb, "Title");
+                    else
+                        siteTitle = GetStringProperty(webRoot, "Title");
+                }
+            }
+            catch { /* ignore */ }
+
+            var items = new List<SubsiteReportItem>();
+
+            foreach (var item in valueElement.EnumerateArray())
+            {
+                var language = 0;
+                if (item.TryGetProperty("Language", out var langProp))
+                {
+                    if (langProp.ValueKind == JsonValueKind.Number)
+                        language = langProp.GetInt32();
+                }
+
+                items.Add(new SubsiteReportItem
+                {
+                    SiteCollectionUrl = siteCollectionUrl,
+                    SiteUrl = siteUrl,
+                    SiteTitle = siteTitle,
+                    SubsiteUrl = GetStringProperty(item, "Url"),
+                    SubsiteTitle = GetStringProperty(item, "Title"),
+                    ServerRelativeUrl = GetStringProperty(item, "ServerRelativeUrl"),
+                    WebTemplate = GetStringProperty(item, "WebTemplate"),
+                    Created = GetDateProperty(item, "Created"),
+                    LastModified = GetDateProperty(item, "LastItemModifiedDate"),
+                    Language = language
+                });
+            }
+
+            return new SharePointResult<List<SubsiteReportItem>>
+            {
+                Data = items,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<List<SubsiteReportItem>>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    #endregion
+
+    #region Publishing Feature Methods
+
+    public async Task<SharePointResult<SitePublishingResult>> GetPublishingFeatureStatusAsync(string siteUrl)
+    {
+        try
+        {
+            var baseUrl = siteUrl.TrimEnd('/');
+            var result = new SitePublishingResult { SiteUrl = siteUrl };
+
+            // Get site title
+            try
+            {
+                var siteInfo = await GetSiteInfoAsync(siteUrl);
+                result.SiteTitle = siteInfo.Title;
+            }
+            catch { /* ignore */ }
+
+            // Check site collection features for Publishing Infrastructure
+            var siteFeatureIds = new HashSet<Guid>();
+            var siteFeaturesUrl = $"{baseUrl}/_api/site/features?$select=DefinitionId";
+            var siteFeaturesResponse = await _client.GetAsync(siteFeaturesUrl);
+
+            if (siteFeaturesResponse.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                siteFeaturesResponse.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                return new SharePointResult<SitePublishingResult>
+                {
+                    Status = GetSharePointStatus(siteFeaturesResponse.StatusCode),
+                    ErrorMessage = GetErrorMessage(siteFeaturesResponse.StatusCode)
+                };
+            }
+
+            if (siteFeaturesResponse.IsSuccessStatusCode)
+            {
+                var json = await siteFeaturesResponse.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                JsonElement valueElement;
+                if (root.TryGetProperty("value", out valueElement) ||
+                    (root.TryGetProperty("d", out var d) && d.TryGetProperty("results", out valueElement)))
+                {
+                    foreach (var feature in valueElement.EnumerateArray())
+                    {
+                        var defId = GetGuidProperty(feature, "DefinitionId");
+                        if (defId != Guid.Empty)
+                            siteFeatureIds.Add(defId);
+                    }
+                }
+            }
+
+            result.HasPublishingInfrastructure = siteFeatureIds.Contains(PublishingFeatureIds.PublishingInfrastructure);
+
+            // Check web features for Publishing
+            var webFeatureIds = new HashSet<Guid>();
+            var webFeaturesUrl = $"{baseUrl}/_api/web/features?$select=DefinitionId";
+            var webFeaturesResponse = await _client.GetAsync(webFeaturesUrl);
+
+            if (webFeaturesResponse.IsSuccessStatusCode)
+            {
+                var json = await webFeaturesResponse.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                JsonElement valueElement;
+                if (root.TryGetProperty("value", out valueElement) ||
+                    (root.TryGetProperty("d", out var d) && d.TryGetProperty("results", out valueElement)))
+                {
+                    foreach (var feature in valueElement.EnumerateArray())
+                    {
+                        var defId = GetGuidProperty(feature, "DefinitionId");
+                        if (defId != Guid.Empty)
+                            webFeatureIds.Add(defId);
+                    }
+                }
+            }
+
+            result.HasPublishingWeb = webFeatureIds.Contains(PublishingFeatureIds.PublishingWeb);
+            result.Success = true;
+
+            return new SharePointResult<SitePublishingResult>
+            {
+                Data = result,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                                                ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            return new SharePointResult<SitePublishingResult>
+            {
+                Status = ex.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                    ? SharePointResultStatus.AuthenticationRequired
+                    : SharePointResultStatus.AccessDenied,
+                ErrorMessage = ex.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<SitePublishingResult>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    #endregion
+
+    #region List Customization Methods
+
+    public async Task<SharePointResult<List<CustomizedListItem>>> GetListFormCustomizationsAsync(string siteUrl)
+    {
+        try
+        {
+            var items = new List<CustomizedListItem>();
+            var baseUrl = siteUrl.TrimEnd('/');
+
+            // Get site title
+            var siteTitle = string.Empty;
+            try
+            {
+                var siteInfo = await GetSiteInfoAsync(siteUrl);
+                siteTitle = siteInfo.Title;
+            }
+            catch { /* ignore */ }
+
+            // Get all visible lists with form URLs
+            var listsUrl = $"{baseUrl}/_api/web/lists?$select=Id,Title,BaseType,Hidden,ItemCount,DefaultNewFormUrl,DefaultEditFormUrl,DefaultDisplayFormUrl,RootFolder/ServerRelativeUrl&$expand=RootFolder&$filter=Hidden eq false";
+            var response = await _client.GetAsync(listsUrl);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new SharePointResult<List<CustomizedListItem>>
+                {
+                    Status = GetSharePointStatus(response.StatusCode),
+                    ErrorMessage = GetErrorMessage(response.StatusCode)
+                };
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            JsonElement valueElement;
+            if (root.TryGetProperty("value", out valueElement))
+            {
+                // Standard OData nometadata
+            }
+            else if (root.TryGetProperty("d", out var dElement) &&
+                     dElement.TryGetProperty("results", out valueElement))
+            {
+                // OData verbose
+            }
+            else
+            {
+                return new SharePointResult<List<CustomizedListItem>>
+                {
+                    Data = items,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            foreach (var listElement in valueElement.EnumerateArray())
+            {
+                var baseType = GetIntProperty(listElement, "BaseType");
+                // Only GenericList (0) and DocumentLibrary (1)
+                if (baseType != 0 && baseType != 1) continue;
+
+                var listId = GetGuidProperty(listElement, "Id");
+                var listTitle = GetStringProperty(listElement, "Title");
+                var itemCount = GetIntProperty(listElement, "ItemCount");
+                var newFormUrl = GetStringProperty(listElement, "DefaultNewFormUrl");
+                var editFormUrl = GetStringProperty(listElement, "DefaultEditFormUrl");
+                var displayFormUrl = GetStringProperty(listElement, "DefaultDisplayFormUrl");
+
+                var serverRelativeUrl = string.Empty;
+                if (listElement.TryGetProperty("RootFolder", out var rf))
+                {
+                    serverRelativeUrl = GetStringProperty(rf, "ServerRelativeUrl");
+                }
+
+                var formType = ListFormType.Default;
+                var spfxNewId = string.Empty;
+                var spfxEditId = string.Empty;
+                var spfxDisplayId = string.Empty;
+
+                // Check 1: URL-based Power Apps detection (quick)
+                if (newFormUrl.Contains("PowerApps", StringComparison.OrdinalIgnoreCase) ||
+                    editFormUrl.Contains("PowerApps", StringComparison.OrdinalIgnoreCase))
+                {
+                    formType = ListFormType.PowerApps;
+                }
+
+                // Check 2: Property bag Power Apps detection
+                if (formType == ListFormType.Default && listId != Guid.Empty)
+                {
+                    try
+                    {
+                        var propsUrl = $"{baseUrl}/_api/web/lists(guid'{listId}')/RootFolder/Properties";
+                        var propsResponse = await _client.GetAsync(propsUrl);
+                        if (propsResponse.IsSuccessStatusCode)
+                        {
+                            var propsJson = await propsResponse.Content.ReadAsStringAsync();
+                            if (propsJson.Contains("PowerAppsFormProperties", StringComparison.OrdinalIgnoreCase) ||
+                                propsJson.Contains("PowerAppFormProperties", StringComparison.OrdinalIgnoreCase) ||
+                                propsJson.Contains("_PowerAppsId_", StringComparison.OrdinalIgnoreCase) ||
+                                propsJson.Contains("PowerAppsFormId", StringComparison.OrdinalIgnoreCase))
+                            {
+                                formType = ListFormType.PowerApps;
+                            }
+                        }
+                    }
+                    catch { /* skip property bag check */ }
+                }
+
+                // Check 3: SPFx Content Type detection
+                if (formType == ListFormType.Default && listId != Guid.Empty)
+                {
+                    try
+                    {
+                        var ctUrl = $"{baseUrl}/_api/web/lists(guid'{listId}')/ContentTypes?$select=Name,StringId,NewFormClientSideComponentId,EditFormClientSideComponentId,DisplayFormClientSideComponentId";
+                        var ctResponse = await _client.GetAsync(ctUrl);
+                        if (ctResponse.IsSuccessStatusCode)
+                        {
+                            var ctJson = await ctResponse.Content.ReadAsStringAsync();
+                            using var ctDoc = JsonDocument.Parse(ctJson);
+                            var ctRoot = ctDoc.RootElement;
+
+                            JsonElement ctValue;
+                            if (ctRoot.TryGetProperty("value", out ctValue) ||
+                                (ctRoot.TryGetProperty("d", out var ctD) && ctD.TryGetProperty("results", out ctValue)))
+                            {
+                                foreach (var ct in ctValue.EnumerateArray())
+                                {
+                                    var newComp = GetStringProperty(ct, "NewFormClientSideComponentId");
+                                    var editComp = GetStringProperty(ct, "EditFormClientSideComponentId");
+                                    var displayComp = GetStringProperty(ct, "DisplayFormClientSideComponentId");
+
+                                    // Non-empty and not the empty GUID means SPFx is configured
+                                    var hasSpfx = IsNonEmptyGuid(newComp) || IsNonEmptyGuid(editComp) || IsNonEmptyGuid(displayComp);
+                                    if (hasSpfx)
+                                    {
+                                        formType = ListFormType.SPFxCustomForm;
+                                        spfxNewId = IsNonEmptyGuid(newComp) ? newComp : string.Empty;
+                                        spfxEditId = IsNonEmptyGuid(editComp) ? editComp : string.Empty;
+                                        spfxDisplayId = IsNonEmptyGuid(displayComp) ? displayComp : string.Empty;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch { /* skip SPFx check */ }
+                }
+
+                items.Add(new CustomizedListItem
+                {
+                    SiteUrl = siteUrl,
+                    SiteTitle = siteTitle,
+                    ListId = listId,
+                    ListTitle = listTitle,
+                    ListType = baseType == 0 ? "List" : "Document Library",
+                    FormType = formType,
+                    ItemCount = itemCount,
+                    ListUrl = serverRelativeUrl,
+                    DefaultNewFormUrl = newFormUrl,
+                    DefaultEditFormUrl = editFormUrl,
+                    DefaultDisplayFormUrl = displayFormUrl,
+                    SpfxNewFormComponentId = spfxNewId,
+                    SpfxEditFormComponentId = spfxEditId,
+                    SpfxDisplayFormComponentId = spfxDisplayId
+                });
+            }
+
+            return new SharePointResult<List<CustomizedListItem>>
+            {
+                Data = items,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                                                ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            return new SharePointResult<List<CustomizedListItem>>
+            {
+                Status = ex.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                    ? SharePointResultStatus.AuthenticationRequired
+                    : SharePointResultStatus.AccessDenied,
+                ErrorMessage = ex.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<List<CustomizedListItem>>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    private static bool IsNonEmptyGuid(string value)
+    {
+        return !string.IsNullOrEmpty(value) &&
+               Guid.TryParse(value, out var guid) &&
+               guid != Guid.Empty;
+    }
+
+    #endregion
+
+    #region Custom Fields Methods
+
+    public async Task<SharePointResult<List<CustomFieldItem>>> GetListCustomFieldsAsync(
+        string siteUrl, string siteCollectionUrl)
+    {
+        try
+        {
+            var items = new List<CustomFieldItem>();
+            var baseUrl = siteUrl.TrimEnd('/');
+
+            // Get site title
+            var siteTitle = string.Empty;
+            try
+            {
+                var siteInfo = await GetSiteInfoAsync(siteUrl);
+                siteTitle = siteInfo.Title;
+            }
+            catch { /* ignore */ }
+
+            // Get all visible lists with metadata
+            var listsUrl = $"{baseUrl}/_api/web/lists?$select=Id,Title,BaseType,Hidden,ItemCount,Created,LastItemModifiedDate,RootFolder/ServerRelativeUrl&$expand=RootFolder&$filter=Hidden eq false";
+            var response = await _client.GetAsync(listsUrl);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new SharePointResult<List<CustomFieldItem>>
+                {
+                    Status = GetSharePointStatus(response.StatusCode),
+                    ErrorMessage = GetErrorMessage(response.StatusCode)
+                };
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            JsonElement valueElement;
+            if (root.TryGetProperty("value", out valueElement))
+            {
+                // Standard OData nometadata
+            }
+            else if (root.TryGetProperty("d", out var dElement) &&
+                     dElement.TryGetProperty("results", out valueElement))
+            {
+                // OData verbose
+            }
+            else
+            {
+                return new SharePointResult<List<CustomFieldItem>>
+                {
+                    Data = items,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            foreach (var listElement in valueElement.EnumerateArray())
+            {
+                var baseType = GetIntProperty(listElement, "BaseType");
+                // Only GenericList (0) and DocumentLibrary (1)
+                if (baseType != 0 && baseType != 1) continue;
+
+                var listId = GetGuidProperty(listElement, "Id");
+                var listTitle = GetStringProperty(listElement, "Title");
+                var itemCount = GetIntProperty(listElement, "ItemCount");
+
+                var listCreated = DateTime.MinValue;
+                var listModified = DateTime.MinValue;
+                if (listElement.TryGetProperty("Created", out var createdProp))
+                {
+                    DateTime.TryParse(createdProp.GetString(), out listCreated);
+                }
+                if (listElement.TryGetProperty("LastItemModifiedDate", out var modifiedProp))
+                {
+                    DateTime.TryParse(modifiedProp.GetString(), out listModified);
+                }
+
+                var serverRelativeUrl = string.Empty;
+                if (listElement.TryGetProperty("RootFolder", out var rf))
+                {
+                    serverRelativeUrl = GetStringProperty(rf, "ServerRelativeUrl");
+                }
+
+                if (listId == Guid.Empty) continue;
+
+                // Get fields for this list
+                try
+                {
+                    var fieldsUrl = $"{baseUrl}/_api/web/lists(guid'{listId}')/fields?$filter=Hidden eq false and FromBaseType eq false&$select=Title,InternalName,TypeAsString,Group,CanBeDeleted,FromBaseType";
+                    var fieldsResponse = await _client.GetAsync(fieldsUrl);
+
+                    if (!fieldsResponse.IsSuccessStatusCode)
+                    {
+                        // Fallback: some environments may not support FromBaseType in $filter
+                        fieldsUrl = $"{baseUrl}/_api/web/lists(guid'{listId}')/fields?$filter=Hidden eq false&$select=Title,InternalName,TypeAsString,Group,CanBeDeleted,FromBaseType";
+                        fieldsResponse = await _client.GetAsync(fieldsUrl);
+                        if (!fieldsResponse.IsSuccessStatusCode) continue;
+                    }
+
+                    var fieldsJson = await fieldsResponse.Content.ReadAsStringAsync();
+                    using var fieldsDoc = JsonDocument.Parse(fieldsJson);
+                    var fieldsRoot = fieldsDoc.RootElement;
+
+                    JsonElement fieldsValue;
+                    if (fieldsRoot.TryGetProperty("value", out fieldsValue))
+                    {
+                        // Standard
+                    }
+                    else if (fieldsRoot.TryGetProperty("d", out var fd) &&
+                             fd.TryGetProperty("results", out fieldsValue))
+                    {
+                        // Verbose
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    foreach (var fieldElement in fieldsValue.EnumerateArray())
+                    {
+                        var group = GetStringProperty(fieldElement, "Group");
+
+                        if (!OotbFieldGroups.IsCustomGroup(group)) continue;
+
+                        // Skip system fields that SharePoint puts in "Custom Columns"
+                        var fromBaseType = GetBoolProperty(fieldElement, "FromBaseType");
+                        if (fromBaseType) continue;
+
+                        var internalName = GetStringProperty(fieldElement, "InternalName");
+                        if (OotbFieldGroups.IsSystemFieldInternalName(internalName)) continue;
+
+                        // OOTB list-template fields typically cannot be deleted
+                        var canBeDeleted = GetBoolProperty(fieldElement, "CanBeDeleted");
+                        if (!canBeDeleted) continue;
+
+                        items.Add(new CustomFieldItem
+                        {
+                            SiteCollectionUrl = siteCollectionUrl,
+                            SiteUrl = siteUrl,
+                            SiteTitle = siteTitle,
+                            ListTitle = listTitle,
+                            ListUrl = serverRelativeUrl,
+                            ItemCount = itemCount,
+                            ColumnName = GetStringProperty(fieldElement, "Title"),
+                            InternalName = internalName,
+                            FieldType = GetStringProperty(fieldElement, "TypeAsString"),
+                            Group = group,
+                            ListCreated = listCreated,
+                            ListModified = listModified
+                        });
+                    }
+                }
+                catch
+                {
+                    // Skip lists whose fields can't be read
+                }
+            }
+
+            return new SharePointResult<List<CustomFieldItem>>
+            {
+                Data = items,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized ||
+                                                ex.StatusCode == HttpStatusCode.Forbidden)
+        {
+            return new SharePointResult<List<CustomFieldItem>>
+            {
+                Status = SharePointResultStatus.AuthenticationRequired,
+                ErrorMessage = "Authentication required"
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<List<CustomFieldItem>>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    #endregion
+
+    #region Site Users Methods
+
+    public async Task<SharePointResult<List<AdHocUserItem>>> GetSiteUsersAsync(
+        string siteUrl, string? loginNameFilter = null)
+    {
+        try
+        {
+            var users = new List<AdHocUserItem>();
+            var baseUrl = siteUrl.TrimEnd('/');
+
+            // Try server-side filter first (double-encode %3a → %253a for OData filter on URL-encoded LoginName)
+            bool useClientFilter = false;
+            string apiUrl;
+
+            if (!string.IsNullOrEmpty(loginNameFilter))
+            {
+                var encodedFilter = loginNameFilter.Replace("%3a", "%253a");
+                apiUrl = $"{baseUrl}/_api/web/siteusers?$select=Id,LoginName,Title,Email,IsSiteAdmin,PrincipalType&$filter=substringof('{encodedFilter}',LoginName)";
+            }
+            else
+            {
+                apiUrl = $"{baseUrl}/_api/web/siteusers?$select=Id,LoginName,Title,Email,IsSiteAdmin,PrincipalType";
+            }
+
+            var response = await _client.GetAsync(apiUrl);
+
+            // If server-side filter fails, fall back to fetching all users and filtering client-side
+            if (!response.IsSuccessStatusCode && !string.IsNullOrEmpty(loginNameFilter))
+            {
+                useClientFilter = true;
+                apiUrl = $"{baseUrl}/_api/web/siteusers?$select=Id,LoginName,Title,Email,IsSiteAdmin,PrincipalType";
+                response = await _client.GetAsync(apiUrl);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new SharePointResult<List<AdHocUserItem>>
+                {
+                    Status = GetSharePointStatus(response.StatusCode),
+                    ErrorMessage = GetErrorMessage(response.StatusCode)
+                };
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            JsonElement valueElement;
+            if (root.TryGetProperty("value", out valueElement))
+            {
+                // Standard OData nometadata
+            }
+            else if (root.TryGetProperty("d", out var dElement) &&
+                     dElement.TryGetProperty("results", out valueElement))
+            {
+                // OData verbose
+            }
+            else
+            {
+                return new SharePointResult<List<AdHocUserItem>>
+                {
+                    Data = users,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            // Get site title for context
+            var siteTitle = string.Empty;
+            try
+            {
+                var siteInfo = await GetSiteInfoAsync(siteUrl);
+                siteTitle = siteInfo.Title;
+            }
+            catch { /* ignore */ }
+
+            foreach (var item in valueElement.EnumerateArray())
+            {
+                var loginName = GetStringProperty(item, "LoginName");
+
+                // Client-side filter if server-side filter wasn't used
+                if (useClientFilter && !string.IsNullOrEmpty(loginNameFilter))
+                {
+                    if (!loginName.Contains(loginNameFilter, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
+
+                var principalTypeInt = GetIntProperty(item, "PrincipalType");
+                var principalTypeStr = principalTypeInt switch
+                {
+                    1 => "User",
+                    2 => "DistributionList",
+                    4 => "SecurityGroup",
+                    8 => "SharePointGroup",
+                    _ => principalTypeInt.ToString()
+                };
+
+                users.Add(new AdHocUserItem
+                {
+                    SiteUrl = siteUrl,
+                    SiteTitle = siteTitle,
+                    LoginName = loginName,
+                    Title = GetStringProperty(item, "Title"),
+                    Email = GetStringProperty(item, "Email"),
+                    Id = GetIntProperty(item, "Id"),
+                    IsSiteAdmin = GetBoolProperty(item, "IsSiteAdmin"),
+                    PrincipalType = principalTypeStr
+                });
+            }
+
+            return new SharePointResult<List<AdHocUserItem>>
+            {
+                Data = users,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                                                ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            return new SharePointResult<List<AdHocUserItem>>
+            {
+                Status = ex.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                    ? SharePointResultStatus.AuthenticationRequired
+                    : SharePointResultStatus.AccessDenied,
+                ErrorMessage = ex.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<List<AdHocUserItem>>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    #endregion
+
     #region Permission Methods
 
     public async Task<SharePointResult<List<PermissionReportItem>>> GetWebPermissionsAsync(

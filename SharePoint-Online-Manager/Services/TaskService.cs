@@ -1372,6 +1372,1064 @@ public class TaskService : ITaskService
         await File.WriteAllTextAsync(filePath, json);
     }
 
+    public async Task<AdHocUsersReportResult> ExecuteAdHocUsersReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new AdHocUsersReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        var targetUrls = task.TargetSiteUrls;
+        result.Log($"Starting ad hoc users report for {targetUrls.Count} sites");
+
+        try
+        {
+            // Group sites by domain for efficient cookie usage
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SiteAdHocUsersResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Processing {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    var siteResult = new SiteAdHocUsersResult { SiteUrl = siteUrl };
+
+                    try
+                    {
+                        // Get site users filtered by spo%3aguest
+                        var usersResult = await spService.GetSiteUsersAsync(siteUrl, "spo%3aguest");
+
+                        if (usersResult.IsSuccess && usersResult.Data != null)
+                        {
+                            siteResult.Users = usersResult.Data;
+                            siteResult.SiteTitle = usersResult.Data.FirstOrDefault()?.SiteTitle ?? string.Empty;
+
+                            // If no users returned, still get site title
+                            if (string.IsNullOrEmpty(siteResult.SiteTitle))
+                            {
+                                try
+                                {
+                                    var siteInfo = await spService.GetSiteInfoAsync(siteUrl);
+                                    siteResult.SiteTitle = siteInfo.Title;
+                                }
+                                catch { /* ignore */ }
+                            }
+
+                            siteResult.Success = true;
+                            result.SuccessfulSites++;
+                            result.Log($"  Found {usersResult.Data.Count} ad hoc guest user(s)");
+                        }
+                        else if (usersResult.NeedsReauth)
+                        {
+                            siteResult.Success = false;
+                            siteResult.ErrorMessage = "Authentication expired";
+                            result.FailedSites++;
+                            result.Log($"  Authentication expired");
+                        }
+                        else
+                        {
+                            siteResult.Success = false;
+                            siteResult.ErrorMessage = usersResult.ErrorMessage ?? "Unknown error";
+                            result.FailedSites++;
+                            result.Log($"  Error: {siteResult.ErrorMessage}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        siteResult.Success = false;
+                        siteResult.ErrorMessage = ex.Message;
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.SiteResults.Add(siteResult);
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+            result.Log($"Task completed. Successful: {result.SuccessfulSites}, Failed: {result.FailedSites}, Total guests: {result.TotalGuestUsers}");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveAdHocUsersReportResultAsync(result);
+
+        return result;
+    }
+
+    public async Task<List<AdHocUsersReportResult>> GetAdHocUsersReportResultsAsync(Guid taskId)
+    {
+        var results = new List<AdHocUsersReportResult>();
+        var pattern = $"adhocusers_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<AdHocUsersReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<AdHocUsersReportResult?> GetLatestAdHocUsersReportResultAsync(Guid taskId)
+    {
+        var results = await GetAdHocUsersReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveAdHocUsersReportResultAsync(AdHocUsersReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"adhocusers_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public async Task<CustomizedListsReportResult> ExecuteCustomizedListsReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new CustomizedListsReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        var targetUrls = task.TargetSiteUrls;
+        result.Log($"Starting customized lists report for {targetUrls.Count} sites");
+
+        try
+        {
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SiteCustomizedListsResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Scanning lists {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    var siteResult = new SiteCustomizedListsResult { SiteUrl = siteUrl };
+
+                    try
+                    {
+                        var listsResult = await spService.GetListFormCustomizationsAsync(siteUrl);
+
+                        if (listsResult.IsSuccess && listsResult.Data != null)
+                        {
+                            siteResult.Lists = listsResult.Data;
+                            siteResult.SiteTitle = listsResult.Data.FirstOrDefault()?.SiteTitle ?? string.Empty;
+
+                            if (string.IsNullOrEmpty(siteResult.SiteTitle))
+                            {
+                                try
+                                {
+                                    var siteInfo = await spService.GetSiteInfoAsync(siteUrl);
+                                    siteResult.SiteTitle = siteInfo.Title;
+                                }
+                                catch { /* ignore */ }
+                            }
+
+                            siteResult.Success = true;
+                            result.SuccessfulSites++;
+                            result.Log($"  Found {siteResult.TotalLists} lists: {siteResult.PowerAppsCount} Power Apps, {siteResult.SpfxCount} SPFx, {siteResult.TotalLists - siteResult.CustomizedCount} Default");
+                        }
+                        else if (listsResult.NeedsReauth)
+                        {
+                            siteResult.Success = false;
+                            siteResult.ErrorMessage = "Authentication expired";
+                            result.FailedSites++;
+                            result.Log($"  Authentication expired");
+                        }
+                        else
+                        {
+                            siteResult.Success = false;
+                            siteResult.ErrorMessage = listsResult.ErrorMessage ?? "Unknown error";
+                            result.FailedSites++;
+                            result.Log($"  Error: {siteResult.ErrorMessage}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        siteResult.Success = false;
+                        siteResult.ErrorMessage = ex.Message;
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.SiteResults.Add(siteResult);
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+            result.Log($"Task completed. Successful: {result.SuccessfulSites}, Failed: {result.FailedSites}");
+            result.Log($"Total: {result.TotalListsScanned} lists scanned, {result.TotalCustomized} customized ({result.TotalPowerApps} Power Apps, {result.TotalSpfx} SPFx)");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveCustomizedListsReportResultAsync(result);
+
+        return result;
+    }
+
+    public async Task<List<CustomizedListsReportResult>> GetCustomizedListsReportResultsAsync(Guid taskId)
+    {
+        var results = new List<CustomizedListsReportResult>();
+        var pattern = $"customlists_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<CustomizedListsReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<CustomizedListsReportResult?> GetLatestCustomizedListsReportResultAsync(Guid taskId)
+    {
+        var results = await GetCustomizedListsReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveCustomizedListsReportResultAsync(CustomizedListsReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"customlists_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public async Task<PublishingSitesReportResult> ExecutePublishingSitesReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new PublishingSitesReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        var targetUrls = task.TargetSiteUrls;
+        result.Log($"Starting publishing sites report for {targetUrls.Count} sites");
+
+        try
+        {
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SitePublishingResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Checking features {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    try
+                    {
+                        var featureResult = await spService.GetPublishingFeatureStatusAsync(siteUrl);
+
+                        if (featureResult.IsSuccess && featureResult.Data != null)
+                        {
+                            result.SiteResults.Add(featureResult.Data);
+                            result.SuccessfulSites++;
+                            result.Log($"  Publishing status: {featureResult.Data.PublishingStatus}");
+                        }
+                        else if (featureResult.NeedsReauth)
+                        {
+                            result.SiteResults.Add(new SitePublishingResult
+                            {
+                                SiteUrl = siteUrl,
+                                Success = false,
+                                ErrorMessage = "Authentication expired"
+                            });
+                            result.FailedSites++;
+                            result.Log($"  Authentication expired");
+                        }
+                        else
+                        {
+                            result.SiteResults.Add(new SitePublishingResult
+                            {
+                                SiteUrl = siteUrl,
+                                Success = false,
+                                ErrorMessage = featureResult.ErrorMessage ?? "Unknown error"
+                            });
+                            result.FailedSites++;
+                            result.Log($"  Error: {featureResult.ErrorMessage}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.SiteResults.Add(new SitePublishingResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = ex.Message
+                        });
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+            result.Log($"Task completed. Successful: {result.SuccessfulSites}, Failed: {result.FailedSites}");
+            result.Log($"Publishing: {result.PublishingSitesCount} sites ({result.BothActiveCount} both, {result.InfraOnlyCount} infra only, {result.WebOnlyCount} web only), Non-publishing: {result.NonPublishingSitesCount}");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SavePublishingSitesReportResultAsync(result);
+
+        return result;
+    }
+
+    public async Task<List<PublishingSitesReportResult>> GetPublishingSitesReportResultsAsync(Guid taskId)
+    {
+        var results = new List<PublishingSitesReportResult>();
+        var pattern = $"publishing_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<PublishingSitesReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<PublishingSitesReportResult?> GetLatestPublishingSitesReportResultAsync(Guid taskId)
+    {
+        var results = await GetPublishingSitesReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SavePublishingSitesReportResultAsync(PublishingSitesReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"publishing_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public async Task<CustomFieldsReportResult> ExecuteCustomFieldsReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new CustomFieldsReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        var targetUrls = task.TargetSiteUrls;
+        result.Log($"Starting custom fields report for {targetUrls.Count} sites");
+
+        try
+        {
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SiteCustomFieldsResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Scanning fields {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    // Determine site collection URL (root of the site collection)
+                    var siteCollectionUrl = siteUrl;
+                    try
+                    {
+                        var uri = new Uri(siteUrl);
+                        var pathSegments = uri.AbsolutePath.TrimStart('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+                        if (pathSegments.Length >= 2 &&
+                            pathSegments[0].Equals("sites", StringComparison.OrdinalIgnoreCase))
+                        {
+                            siteCollectionUrl = $"{uri.Scheme}://{uri.Host}/sites/{pathSegments[1]}";
+                        }
+                    }
+                    catch { /* use siteUrl as fallback */ }
+
+                    try
+                    {
+                        var fieldsResult = await spService.GetListCustomFieldsAsync(siteUrl, siteCollectionUrl);
+
+                        if (fieldsResult.IsSuccess && fieldsResult.Data != null)
+                        {
+                            // Count lists scanned by looking at distinct lists in the returned data
+                            // But we also need total lists scanned - get via a separate lightweight call
+                            var listsScanned = 0;
+                            try
+                            {
+                                var listsResult = await spService.GetListsAsync(siteUrl, false);
+                                if (listsResult.IsSuccess && listsResult.Data != null)
+                                {
+                                    listsScanned = listsResult.Data.Count;
+                                }
+                            }
+                            catch { /* ignore */ }
+
+                            var siteResult = new SiteCustomFieldsResult
+                            {
+                                SiteUrl = siteUrl,
+                                SiteTitle = fieldsResult.Data.FirstOrDefault()?.SiteTitle ?? string.Empty,
+                                Success = true,
+                                Fields = fieldsResult.Data,
+                                ListsScanned = listsScanned
+                            };
+
+                            result.SiteResults.Add(siteResult);
+                            result.SuccessfulSites++;
+                            result.Log($"  Found {siteResult.CustomFieldCount} custom fields across {siteResult.ListsWithCustomFields} lists ({listsScanned} lists scanned)");
+                        }
+                        else if (fieldsResult.NeedsReauth)
+                        {
+                            result.SiteResults.Add(new SiteCustomFieldsResult
+                            {
+                                SiteUrl = siteUrl,
+                                Success = false,
+                                ErrorMessage = "Authentication expired"
+                            });
+                            result.FailedSites++;
+                            result.Log($"  Authentication expired");
+                        }
+                        else
+                        {
+                            result.SiteResults.Add(new SiteCustomFieldsResult
+                            {
+                                SiteUrl = siteUrl,
+                                Success = false,
+                                ErrorMessage = fieldsResult.ErrorMessage ?? "Unknown error"
+                            });
+                            result.FailedSites++;
+                            result.Log($"  Error: {fieldsResult.ErrorMessage}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.SiteResults.Add(new SiteCustomFieldsResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = ex.Message
+                        });
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+            result.Log($"Task completed. Successful: {result.SuccessfulSites}, Failed: {result.FailedSites}");
+            result.Log($"Total custom fields: {result.TotalCustomFields} across {result.TotalListsWithCustomFields} lists ({result.TotalListsScanned} lists scanned)");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveCustomFieldsReportResultAsync(result);
+
+        return result;
+    }
+
+    public async Task<List<CustomFieldsReportResult>> GetCustomFieldsReportResultsAsync(Guid taskId)
+    {
+        var results = new List<CustomFieldsReportResult>();
+        var pattern = $"customfields_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<CustomFieldsReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<CustomFieldsReportResult?> GetLatestCustomFieldsReportResultAsync(Guid taskId)
+    {
+        var results = await GetCustomFieldsReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveCustomFieldsReportResultAsync(CustomFieldsReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"customfields_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public async Task<SubsitesReportResult> ExecuteSubsitesReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new SubsitesReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        var targetUrls = task.TargetSiteUrls;
+        result.Log($"Starting subsites report for {targetUrls.Count} sites");
+
+        try
+        {
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SiteSubsitesResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Scanning subsites {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    try
+                    {
+                        var subsitesResult = await spService.GetSubsitesForReportAsync(siteUrl, siteUrl);
+
+                        if (subsitesResult.IsSuccess && subsitesResult.Data != null)
+                        {
+                            var siteResult = new SiteSubsitesResult
+                            {
+                                SiteUrl = siteUrl,
+                                SiteTitle = subsitesResult.Data.FirstOrDefault()?.SiteTitle ?? "",
+                                Success = true,
+                                Subsites = subsitesResult.Data
+                            };
+                            result.SiteResults.Add(siteResult);
+                            result.SuccessfulSites++;
+                            result.Log($"  Found {siteResult.SubsiteCount} subsite(s)");
+                        }
+                        else if (subsitesResult.NeedsReauth)
+                        {
+                            result.SiteResults.Add(new SiteSubsitesResult
+                            {
+                                SiteUrl = siteUrl,
+                                Success = false,
+                                ErrorMessage = "Authentication expired"
+                            });
+                            result.FailedSites++;
+                            result.Log($"  Authentication expired");
+                        }
+                        else
+                        {
+                            result.SiteResults.Add(new SiteSubsitesResult
+                            {
+                                SiteUrl = siteUrl,
+                                Success = false,
+                                ErrorMessage = subsitesResult.ErrorMessage ?? "Unknown error"
+                            });
+                            result.FailedSites++;
+                            result.Log($"  Error: {subsitesResult.ErrorMessage}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.SiteResults.Add(new SiteSubsitesResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = ex.Message
+                        });
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+            result.Log($"Task completed. Successful: {result.SuccessfulSites}, Failed: {result.FailedSites}");
+            result.Log($"Sites with subsites: {result.SitesWithSubsites}, Without: {result.SitesWithoutSubsites}, Total subsites: {result.TotalSubsites}");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveSubsitesReportResultAsync(result);
+
+        return result;
+    }
+
+    public async Task<List<SubsitesReportResult>> GetSubsitesReportResultsAsync(Guid taskId)
+    {
+        var results = new List<SubsitesReportResult>();
+        var pattern = $"subsites_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<SubsitesReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<SubsitesReportResult?> GetLatestSubsitesReportResultAsync(Guid taskId)
+    {
+        var results = await GetSubsitesReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveSubsitesReportResultAsync(SubsitesReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"subsites_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
     public async Task<NavigationSettingsResult> ExecuteNavigationSettingsSyncAsync(
         TaskDefinition task,
         IAuthenticationService authService,

@@ -158,6 +158,52 @@ public interface ISharePointService : IDisposable
     Task<SharePointResult<bool>> SetNavigationSettingsAsync(string siteUrl, NavigationSettings settings);
 
     /// <summary>
+    /// Checks whether SharePoint Publishing features are activated on a site.
+    /// Checks both site collection (Publishing Infrastructure) and web (Publishing) features.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <returns>The publishing feature status for the site.</returns>
+    Task<SharePointResult<SitePublishingResult>> GetPublishingFeatureStatusAsync(string siteUrl);
+
+    /// <summary>
+    /// Gets all visible lists from a site and detects Power Apps / SPFx form customizations.
+    /// Checks: form URLs, RootFolder property bag, and ContentType SPFx component IDs.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <returns>A list of all visible lists/libraries with their form customization type.</returns>
+    Task<SharePointResult<List<CustomizedListItem>>> GetListFormCustomizationsAsync(string siteUrl);
+
+    /// <summary>
+    /// Gets site users, optionally filtered by login name substring.
+    /// Used for finding ad hoc (OTP) guest users with spo%3aguest in LoginName.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <param name="loginNameFilter">Optional substring to filter LoginName (e.g. "spo%3aguest").</param>
+    /// <returns>A list of matching ad hoc user items.</returns>
+    Task<SharePointResult<List<AdHocUserItem>>> GetSiteUsersAsync(
+        string siteUrl, string? loginNameFilter = null);
+
+    /// <summary>
+    /// Gets custom (non-OOTB) fields from all visible lists on a site.
+    /// Custom fields are those in the "Custom Columns" group or any non-standard group.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <param name="siteCollectionUrl">The site collection URL for reporting.</param>
+    /// <returns>A list of custom field items across all lists.</returns>
+    Task<SharePointResult<List<CustomFieldItem>>> GetListCustomFieldsAsync(
+        string siteUrl, string siteCollectionUrl);
+
+    /// <summary>
+    /// Gets all subsites of a SharePoint site with extended properties for reporting.
+    /// Returns SubsiteReportItem with language, template, etc.
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <param name="siteCollectionUrl">The site collection URL for reporting.</param>
+    /// <returns>A list of subsite report items.</returns>
+    Task<SharePointResult<List<SubsiteReportItem>>> GetSubsitesForReportAsync(
+        string siteUrl, string siteCollectionUrl);
+
+    /// <summary>
     /// Gets documents from a library for comparison purposes.
     /// Uses pagination to handle large libraries efficiently.
     /// </summary>
