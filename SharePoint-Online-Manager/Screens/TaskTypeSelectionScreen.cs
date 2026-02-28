@@ -182,6 +182,7 @@ public class TaskTypeSelectionScreen : BaseScreen
         TaskType.PublishingSitesReport => "\U0001F4F0", // newspaper emoji (publishing)
         TaskType.CustomFieldsReport => "\U0001F4DD", // memo emoji (custom fields)
         TaskType.SubsitesReport => "\U0001F3D7", // building construction emoji (subsites)
+        TaskType.BrokenOneNoteReport => "\U0001F4D3", // notebook emoji
         _ => "\U0001F4C4" // page emoji
     };
 
@@ -271,6 +272,10 @@ public class TaskTypeSelectionScreen : BaseScreen
             else if (taskType == TaskType.SubsitesReport)
             {
                 await NavigationService!.NavigateToAsync<SubsitesReportDetailScreen>(task);
+            }
+            else if (taskType == TaskType.BrokenOneNoteReport)
+            {
+                await NavigationService!.NavigateToAsync<BrokenOneNoteDetailScreen>(task);
             }
             else
             {

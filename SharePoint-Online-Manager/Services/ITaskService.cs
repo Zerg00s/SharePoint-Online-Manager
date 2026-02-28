@@ -301,6 +301,40 @@ public interface ITaskService
     Task SaveSubsitesReportResultAsync(SubsitesReportResult result);
 
     /// <summary>
+    /// Executes a broken OneNote notebooks report task and returns the results.
+    /// </summary>
+    Task<BrokenOneNoteReportResult> ExecuteBrokenOneNoteReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Executes the fix for broken OneNote notebooks using an existing report result.
+    /// </summary>
+    Task<BrokenOneNoteReportResult> ExecuteBrokenOneNoteFixAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        BrokenOneNoteReportResult existingResult,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all broken OneNote report results for a task.
+    /// </summary>
+    Task<List<BrokenOneNoteReportResult>> GetBrokenOneNoteReportResultsAsync(Guid taskId);
+
+    /// <summary>
+    /// Gets the most recent broken OneNote report result for a task.
+    /// </summary>
+    Task<BrokenOneNoteReportResult?> GetLatestBrokenOneNoteReportResultAsync(Guid taskId);
+
+    /// <summary>
+    /// Saves a broken OneNote report result.
+    /// </summary>
+    Task SaveBrokenOneNoteReportResultAsync(BrokenOneNoteReportResult result);
+
+    /// <summary>
     /// Executes a site access check task and returns the results.
     /// </summary>
     Task<SiteAccessResult> ExecuteSiteAccessCheckAsync(

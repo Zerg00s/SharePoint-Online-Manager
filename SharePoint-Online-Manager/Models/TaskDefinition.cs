@@ -78,7 +78,12 @@ public enum TaskType
     /// <summary>
     /// Report on site collections that have subsites.
     /// </summary>
-    SubsitesReport
+    SubsitesReport,
+
+    /// <summary>
+    /// Find broken OneNote notebooks and optionally fix them.
+    /// </summary>
+    BrokenOneNoteReport
 }
 
 /// <summary>
@@ -131,6 +136,7 @@ public class TaskDefinition
         TaskType.PublishingSitesReport => "Publishing Sites Report",
         TaskType.CustomFieldsReport => "Custom Fields Report",
         TaskType.SubsitesReport => "Subsites Report",
+        TaskType.BrokenOneNoteReport => "Broken OneNote Report",
         _ => Type.ToString()
     };
 
@@ -173,6 +179,7 @@ public static class TaskTypeExtensions
         TaskType.PublishingSitesReport => "Find sites with SharePoint Publishing features activated",
         TaskType.CustomFieldsReport => "Report on custom (non-OOTB) fields across lists and libraries",
         TaskType.SubsitesReport => "Report on site collections that have one or more subsites",
+        TaskType.BrokenOneNoteReport => "Find broken OneNote notebooks and optionally fix them",
         _ => type.ToString()
     };
 
@@ -196,6 +203,7 @@ public static class TaskTypeExtensions
         TaskType.PublishingSitesReport => "Publishing Sites Report",
         TaskType.CustomFieldsReport => "Custom Fields Report",
         TaskType.SubsitesReport => "Subsites Report",
+        TaskType.BrokenOneNoteReport => "Broken OneNote Report",
         _ => type.ToString()
     };
 

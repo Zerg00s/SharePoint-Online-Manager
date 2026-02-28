@@ -3140,6 +3140,281 @@ public class SharePointService : ISharePointService
         }
     }
 
+    public async Task<SharePointResult<List<BrokenOneNoteItem>>> GetBrokenOneNoteNotebooksAsync(string siteUrl)
+    {
+        try
+        {
+            var notebooks = new List<BrokenOneNoteItem>();
+            var baseUrl = siteUrl.TrimEnd('/');
+
+            // Get site title
+            var siteTitle = string.Empty;
+            try
+            {
+                var siteInfo = await GetSiteInfoAsync(siteUrl);
+                siteTitle = siteInfo.Title;
+            }
+            catch { /* ignore */ }
+
+            // Get all visible document libraries (BaseType=1)
+            var listsUrl = $"{baseUrl}/_api/web/lists?$select=Id,Title,BaseType,Hidden,RootFolder/ServerRelativeUrl&$expand=RootFolder&$filter=BaseType eq 1 and Hidden eq false";
+            var listsResponse = await _client.GetAsync(listsUrl);
+
+            if (!listsResponse.IsSuccessStatusCode)
+            {
+                return new SharePointResult<List<BrokenOneNoteItem>>
+                {
+                    Status = GetSharePointStatus(listsResponse.StatusCode),
+                    ErrorMessage = GetErrorMessage(listsResponse.StatusCode)
+                };
+            }
+
+            var listsJson = await listsResponse.Content.ReadAsStringAsync();
+            using var listsDoc = JsonDocument.Parse(listsJson);
+
+            JsonElement listsValue;
+            if (listsDoc.RootElement.TryGetProperty("value", out listsValue))
+            {
+                // nometadata format
+            }
+            else if (listsDoc.RootElement.TryGetProperty("d", out var dEl) &&
+                     dEl.TryGetProperty("results", out listsValue))
+            {
+                // verbose format
+            }
+            else
+            {
+                return new SharePointResult<List<BrokenOneNoteItem>>
+                {
+                    Data = notebooks,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            // Track processed folder paths to deduplicate
+            var processedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var libElement in listsValue.EnumerateArray())
+            {
+                var libId = GetGuidProperty(libElement, "Id");
+                var libTitle = GetStringProperty(libElement, "Title");
+                var libRootUrl = string.Empty;
+                if (libElement.TryGetProperty("RootFolder", out var rf))
+                {
+                    libRootUrl = GetStringProperty(rf, "ServerRelativeUrl");
+                }
+
+                if (libId == Guid.Empty) continue;
+
+                // Query for .onetoc2 files in this library
+                var onetocUrl = $"{baseUrl}/_api/web/lists(guid'{libId}')/items?$select=Id,FileLeafRef,FileRef,FileDirRef,HTML_x0020_File_x0020_Type,FSObjType&$filter=substringof('.onetoc2',FileLeafRef)&$top=5000";
+                HttpResponseMessage onetocResponse;
+                try
+                {
+                    onetocResponse = await _client.GetAsync(onetocUrl);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (!onetocResponse.IsSuccessStatusCode)
+                    continue;
+
+                var onetocJson = await onetocResponse.Content.ReadAsStringAsync();
+                using var onetocDoc = JsonDocument.Parse(onetocJson);
+
+                JsonElement onetocValue;
+                if (onetocDoc.RootElement.TryGetProperty("value", out onetocValue))
+                {
+                    // nometadata
+                }
+                else if (onetocDoc.RootElement.TryGetProperty("d", out var dEl2) &&
+                         dEl2.TryGetProperty("results", out onetocValue))
+                {
+                    // verbose
+                }
+                else
+                {
+                    continue;
+                }
+
+                foreach (var onetocItem in onetocValue.EnumerateArray())
+                {
+                    var fileDirRef = GetStringProperty(onetocItem, "FileDirRef");
+                    if (string.IsNullOrEmpty(fileDirRef)) continue;
+
+                    // Determine the topmost notebook folder (first folder below the library root)
+                    var notebookFolderPath = GetNotebookFolderPath(fileDirRef, libRootUrl);
+                    if (string.IsNullOrEmpty(notebookFolderPath)) continue;
+
+                    // Deduplicate by folder path
+                    if (!processedFolders.Add(notebookFolderPath)) continue;
+
+                    // Query for the folder item to get its ItemId and HTML_x0020_File_x0020_Type
+                    var encodedFolderPath = notebookFolderPath.Replace("'", "''");
+                    var folderUrl = $"{baseUrl}/_api/web/lists(guid'{libId}')/items?$filter=FileRef eq '{encodedFolderPath}' and FSObjType eq 1&$select=Id,FileLeafRef,FileRef,HTML_x0020_File_x0020_Type&$top=1";
+                    try
+                    {
+                        var folderResponse = await _client.GetAsync(folderUrl);
+                        if (!folderResponse.IsSuccessStatusCode) continue;
+
+                        var folderJson = await folderResponse.Content.ReadAsStringAsync();
+                        using var folderDoc = JsonDocument.Parse(folderJson);
+
+                        JsonElement folderValue;
+                        if (folderDoc.RootElement.TryGetProperty("value", out folderValue))
+                        {
+                            // nometadata
+                        }
+                        else if (folderDoc.RootElement.TryGetProperty("d", out var dEl3) &&
+                                 dEl3.TryGetProperty("results", out folderValue))
+                        {
+                            // verbose
+                        }
+                        else
+                        {
+                            continue;
+                        }
+
+                        foreach (var folderItem in folderValue.EnumerateArray())
+                        {
+                            var itemId = GetIntProperty(folderItem, "Id");
+                            var folderName = GetStringProperty(folderItem, "FileLeafRef");
+                            var htmlFileType = GetStringProperty(folderItem, "HTML_x0020_File_x0020_Type");
+
+                            notebooks.Add(new BrokenOneNoteItem
+                            {
+                                SiteUrl = siteUrl,
+                                SiteTitle = siteTitle,
+                                LibraryTitle = libTitle,
+                                LibraryId = libId,
+                                FolderName = folderName,
+                                FolderServerRelativeUrl = notebookFolderPath,
+                                ItemId = itemId,
+                                HtmlFileType = htmlFileType
+                            });
+                            break; // Only take the first match
+                        }
+                    }
+                    catch
+                    {
+                        // Skip this folder if query fails
+                    }
+                }
+            }
+
+            return new SharePointResult<List<BrokenOneNoteItem>>
+            {
+                Data = notebooks,
+                Status = SharePointResultStatus.Success
+            };
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        {
+            return new SharePointResult<List<BrokenOneNoteItem>>
+            {
+                Status = SharePointResultStatus.AuthenticationRequired,
+                ErrorMessage = "Authentication failed"
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<List<BrokenOneNoteItem>>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    /// <summary>
+    /// Gets the topmost notebook folder path — the first folder below the library root.
+    /// E.g. for fileDirRef="/sites/foo/Docs/Notebook/Section Group" and libRoot="/sites/foo/Docs",
+    /// returns "/sites/foo/Docs/Notebook".
+    /// </summary>
+    private static string GetNotebookFolderPath(string fileDirRef, string libRootUrl)
+    {
+        if (string.IsNullOrEmpty(libRootUrl) || string.IsNullOrEmpty(fileDirRef))
+            return fileDirRef;
+
+        var normalizedLib = libRootUrl.TrimEnd('/');
+        var normalizedDir = fileDirRef.TrimEnd('/');
+
+        // fileDirRef should start with the library root
+        if (!normalizedDir.StartsWith(normalizedLib, StringComparison.OrdinalIgnoreCase))
+            return normalizedDir;
+
+        // Get the relative part after the library root
+        var relativePart = normalizedDir[normalizedLib.Length..];
+        if (string.IsNullOrEmpty(relativePart))
+            return normalizedDir; // .onetoc2 directly in library root — unusual but possible
+
+        // Split into path segments and take the first one (the notebook folder name)
+        var segments = relativePart.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0)
+            return normalizedDir;
+
+        return $"{normalizedLib}/{segments[0]}";
+    }
+
+    public async Task<SharePointResult<bool>> FixOneNoteNotebookAsync(string siteUrl, Guid libraryId, int itemId)
+    {
+        try
+        {
+            var baseUrl = siteUrl.TrimEnd('/');
+
+            var formDigest = await GetFormDigestValueAsync(baseUrl);
+            if (string.IsNullOrEmpty(formDigest))
+            {
+                return new SharePointResult<bool>
+                {
+                    Status = SharePointResultStatus.Error,
+                    ErrorMessage = "Failed to get form digest"
+                };
+            }
+
+            var updateUrl = $"{baseUrl}/_api/web/lists(guid'{libraryId}')/items({itemId})";
+            var body = new StringContent(
+                "{\"HTML_x0020_File_x0020_Type\": \"OneNote.Notebook\"}",
+                System.Text.Encoding.UTF8,
+                "application/json");
+
+            var request = new HttpRequestMessage(HttpMethod.Post, updateUrl)
+            {
+                Content = body
+            };
+            request.Headers.Add("X-HTTP-Method", "MERGE");
+            request.Headers.Add("IF-MATCH", "*");
+            request.Headers.Add("X-RequestDigest", formDigest);
+
+            var response = await _client.SendAsync(request);
+
+            if (response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.NoContent)
+            {
+                return new SharePointResult<bool>
+                {
+                    Data = true,
+                    Status = SharePointResultStatus.Success
+                };
+            }
+
+            return new SharePointResult<bool>
+            {
+                Status = GetSharePointStatus(response.StatusCode),
+                ErrorMessage = $"HTTP {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}"
+            };
+        }
+        catch (Exception ex)
+        {
+            return new SharePointResult<bool>
+            {
+                Status = SharePointResultStatus.Error,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
     public async Task<SharePointResult<List<DocumentCompareSourceItem>>> GetDocumentsForCompareAsync(
         string siteUrl,
         string libraryTitle,

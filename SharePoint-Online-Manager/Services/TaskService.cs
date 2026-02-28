@@ -1784,6 +1784,294 @@ public class TaskService : ITaskService
         await File.WriteAllTextAsync(filePath, json);
     }
 
+    public async Task<BrokenOneNoteReportResult> ExecuteBrokenOneNoteReportAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new BrokenOneNoteReportResult
+        {
+            TaskId = task.Id,
+            ExecutedAt = DateTime.UtcNow
+        };
+
+        task.Status = Models.TaskStatus.Running;
+        task.LastRunAt = DateTime.UtcNow;
+        task.LastError = null;
+        await SaveTaskAsync(task);
+
+        var targetUrls = task.TargetSiteUrls;
+        result.Log($"Starting broken OneNote report for {targetUrls.Count} sites");
+
+        try
+        {
+            var sitesByDomain = targetUrls
+                .GroupBy(url => new Uri(url).Host)
+                .ToList();
+
+            int processedCount = 0;
+
+            foreach (var domainGroup in sitesByDomain)
+            {
+                var domain = domainGroup.Key;
+                result.Log($"Processing domain: {domain}");
+
+                var cookies = authService.GetStoredCookies(domain);
+                if (cookies == null || !cookies.IsValid)
+                {
+                    result.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} sites");
+
+                    foreach (var siteUrl in domainGroup)
+                    {
+                        result.SiteResults.Add(new SiteBrokenOneNoteResult
+                        {
+                            SiteUrl = siteUrl,
+                            Success = false,
+                            ErrorMessage = "Authentication required"
+                        });
+                        result.FailedSites++;
+                    }
+                    processedCount += domainGroup.Count();
+                    continue;
+                }
+
+                using var spService = new SharePointService(cookies, domain);
+
+                foreach (var siteUrl in domainGroup)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    processedCount++;
+                    progress?.Report(new TaskProgress
+                    {
+                        CurrentSite = processedCount,
+                        TotalSites = targetUrls.Count,
+                        CurrentSiteUrl = siteUrl,
+                        Message = $"Scanning notebooks {processedCount}/{targetUrls.Count}: {siteUrl}"
+                    });
+
+                    result.Log($"Processing site: {siteUrl}");
+
+                    var siteResult = new SiteBrokenOneNoteResult { SiteUrl = siteUrl };
+
+                    try
+                    {
+                        var notebooksResult = await spService.GetBrokenOneNoteNotebooksAsync(siteUrl);
+
+                        if (notebooksResult.IsSuccess && notebooksResult.Data != null)
+                        {
+                            siteResult.Notebooks = notebooksResult.Data;
+                            siteResult.SiteTitle = notebooksResult.Data.FirstOrDefault()?.SiteTitle ?? string.Empty;
+
+                            if (string.IsNullOrEmpty(siteResult.SiteTitle))
+                            {
+                                try
+                                {
+                                    var siteInfo = await spService.GetSiteInfoAsync(siteUrl);
+                                    siteResult.SiteTitle = siteInfo.Title;
+                                }
+                                catch { /* ignore */ }
+                            }
+
+                            siteResult.Success = true;
+                            result.SuccessfulSites++;
+                            result.Log($"  Found {siteResult.TotalNotebooks} notebooks: {siteResult.BrokenCount} broken, {siteResult.TotalNotebooks - siteResult.BrokenCount} healthy");
+                        }
+                        else if (notebooksResult.NeedsReauth)
+                        {
+                            siteResult.Success = false;
+                            siteResult.ErrorMessage = "Authentication expired";
+                            result.FailedSites++;
+                            result.Log($"  Authentication expired");
+                        }
+                        else
+                        {
+                            siteResult.Success = false;
+                            siteResult.ErrorMessage = notebooksResult.ErrorMessage ?? "Unknown error";
+                            result.FailedSites++;
+                            result.Log($"  Error: {siteResult.ErrorMessage}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        siteResult.Success = false;
+                        siteResult.ErrorMessage = ex.Message;
+                        result.FailedSites++;
+                        result.Log($"  Exception: {ex.Message}");
+                    }
+
+                    result.SiteResults.Add(siteResult);
+                    result.TotalSitesProcessed++;
+                }
+            }
+
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = result.FailedSites == 0;
+            result.Log($"Task completed. Successful: {result.SuccessfulSites}, Failed: {result.FailedSites}");
+            result.Log($"Total: {result.TotalNotebooksFound} notebooks found, {result.TotalBroken} broken");
+
+            task.Status = result.FailedSites == 0 ? Models.TaskStatus.Completed : Models.TaskStatus.Failed;
+            task.CompletedAt = DateTime.UtcNow;
+
+            if (result.FailedSites > 0)
+            {
+                task.LastError = $"{result.FailedSites} site(s) failed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = "Task was cancelled";
+            result.Log("Task cancelled by user");
+
+            task.Status = Models.TaskStatus.Cancelled;
+            task.LastError = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            result.CompletedAt = DateTime.UtcNow;
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            result.Log($"Task failed: {ex.Message}");
+
+            task.Status = Models.TaskStatus.Failed;
+            task.LastError = ex.Message;
+        }
+
+        await SaveTaskAsync(task);
+        await SaveBrokenOneNoteReportResultAsync(result);
+
+        return result;
+    }
+
+    public async Task<BrokenOneNoteReportResult> ExecuteBrokenOneNoteFixAsync(
+        TaskDefinition task,
+        IAuthenticationService authService,
+        BrokenOneNoteReportResult existingResult,
+        IProgress<TaskProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var brokenNotebooks = existingResult.GetBrokenNotebooks().ToList();
+        existingResult.Log($"Starting fix for {brokenNotebooks.Count} broken notebooks");
+
+        int fixedCount = 0;
+        int failedCount = 0;
+        int processedCount = 0;
+
+        var notebooksByDomain = brokenNotebooks
+            .GroupBy(n => new Uri(n.SiteUrl).Host)
+            .ToList();
+
+        foreach (var domainGroup in notebooksByDomain)
+        {
+            var domain = domainGroup.Key;
+            var cookies = authService.GetStoredCookies(domain);
+            if (cookies == null || !cookies.IsValid)
+            {
+                existingResult.Log($"No valid credentials for {domain} - skipping {domainGroup.Count()} notebooks");
+                foreach (var notebook in domainGroup)
+                {
+                    notebook.FixError = "Authentication required";
+                }
+                failedCount += domainGroup.Count();
+                processedCount += domainGroup.Count();
+                continue;
+            }
+
+            using var spService = new SharePointService(cookies, domain);
+
+            foreach (var notebook in domainGroup)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                processedCount++;
+                progress?.Report(new TaskProgress
+                {
+                    CurrentSite = processedCount,
+                    TotalSites = brokenNotebooks.Count,
+                    CurrentSiteUrl = notebook.SiteUrl,
+                    Message = $"Fixing {processedCount}/{brokenNotebooks.Count}: {notebook.FolderName}"
+                });
+
+                try
+                {
+                    var fixResult = await spService.FixOneNoteNotebookAsync(
+                        notebook.SiteUrl, notebook.LibraryId, notebook.ItemId);
+
+                    if (fixResult.IsSuccess)
+                    {
+                        notebook.IsFixed = true;
+                        notebook.HtmlFileType = "OneNote.Notebook";
+                        fixedCount++;
+                        existingResult.Log($"  Fixed: {notebook.FolderName} in {notebook.SiteUrl}");
+                    }
+                    else
+                    {
+                        notebook.FixError = fixResult.ErrorMessage ?? "Unknown error";
+                        failedCount++;
+                        existingResult.Log($"  Failed: {notebook.FolderName} - {notebook.FixError}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    notebook.FixError = ex.Message;
+                    failedCount++;
+                    existingResult.Log($"  Exception fixing {notebook.FolderName}: {ex.Message}");
+                }
+            }
+        }
+
+        existingResult.Log($"Fix completed. Fixed: {fixedCount}, Failed: {failedCount}");
+        await SaveBrokenOneNoteReportResultAsync(existingResult);
+
+        return existingResult;
+    }
+
+    public async Task<List<BrokenOneNoteReportResult>> GetBrokenOneNoteReportResultsAsync(Guid taskId)
+    {
+        var results = new List<BrokenOneNoteReportResult>();
+        var pattern = $"brokenonenote_{taskId}_*.json";
+        var files = Directory.GetFiles(_resultsFolder, pattern)
+            .OrderByDescending(f => f);
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(file);
+                var result = JsonSerializer.Deserialize<BrokenOneNoteReportResult>(json, _jsonOptions);
+                if (result != null)
+                {
+                    results.Add(result);
+                }
+            }
+            catch
+            {
+                // Skip invalid files
+            }
+        }
+
+        return results;
+    }
+
+    public async Task<BrokenOneNoteReportResult?> GetLatestBrokenOneNoteReportResultAsync(Guid taskId)
+    {
+        var results = await GetBrokenOneNoteReportResultsAsync(taskId);
+        return results.FirstOrDefault();
+    }
+
+    public async Task SaveBrokenOneNoteReportResultAsync(BrokenOneNoteReportResult result)
+    {
+        var timestamp = result.ExecutedAt.ToString("yyyyMMdd_HHmmss");
+        var fileName = $"brokenonenote_{result.TaskId}_{timestamp}.json";
+        var filePath = Path.Combine(_resultsFolder, fileName);
+
+        var json = JsonSerializer.Serialize(result, _jsonOptions);
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
     public async Task<PublishingSitesReportResult> ExecutePublishingSitesReportAsync(
         TaskDefinition task,
         IAuthenticationService authService,

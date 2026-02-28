@@ -514,6 +514,48 @@ public class CsvExporter
     }
 
     /// <summary>
+    /// Exports broken OneNote notebooks report results to a CSV file.
+    /// </summary>
+    public void ExportBrokenOneNoteReport(BrokenOneNoteReportResult result, string filePath, bool brokenOnly = false)
+    {
+        var notebooks = brokenOnly ? result.GetBrokenNotebooks() : result.GetAllNotebooks();
+        var items = notebooks.Select(n => new BrokenOneNoteExportItem
+        {
+            SiteUrl = n.SiteUrl,
+            SiteTitle = n.SiteTitle,
+            LibraryTitle = n.LibraryTitle,
+            FolderName = n.FolderName,
+            FolderPath = n.FolderServerRelativeUrl,
+            ItemId = n.ItemId,
+            HtmlFileType = n.HtmlFileType,
+            IsBroken = n.IsBroken ? "Yes" : "No",
+            IsFixed = n.IsFixed ? "Yes" : "No",
+            FixError = n.FixError ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
+    /// Exports broken OneNote notebooks report site summary to a CSV file.
+    /// </summary>
+    public void ExportBrokenOneNoteReportSummary(BrokenOneNoteReportResult result, string filePath)
+    {
+        var items = result.SiteResults.Select(s => new BrokenOneNoteSiteSummaryExportItem
+        {
+            SiteUrl = s.SiteUrl,
+            SiteTitle = s.SiteTitle,
+            TotalNotebooks = s.TotalNotebooks,
+            BrokenCount = s.BrokenCount,
+            FixedCount = s.FixedCount,
+            Status = s.Success ? "Success" : "Failed",
+            Error = s.ErrorMessage ?? ""
+        }).ToList();
+
+        ExportToCsv(items, filePath);
+    }
+
+    /// <summary>
     /// Exports publishing sites report results to a CSV file.
     /// </summary>
     public void ExportPublishingSitesReport(PublishingSitesReportResult result, string filePath, bool publishingOnly = false)

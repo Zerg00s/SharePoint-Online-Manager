@@ -408,6 +408,10 @@ public class TaskListScreen : BaseScreen
         {
             await NavigationService!.NavigateToAsync<SubsitesReportDetailScreen>(task);
         }
+        else if (task.Type == TaskType.BrokenOneNoteReport)
+        {
+            await NavigationService!.NavigateToAsync<BrokenOneNoteDetailScreen>(task);
+        }
         else
         {
             await NavigationService!.NavigateToAsync<TaskDetailScreen>(task);
@@ -483,6 +487,10 @@ public class TaskListScreen : BaseScreen
         else if (task.Type == TaskType.SubsitesReport)
         {
             await NavigationService!.NavigateToAsync<SubsitesReportDetailScreen>(execParam);
+        }
+        else if (task.Type == TaskType.BrokenOneNoteReport)
+        {
+            await NavigationService!.NavigateToAsync<BrokenOneNoteDetailScreen>(execParam);
         }
         else
         {

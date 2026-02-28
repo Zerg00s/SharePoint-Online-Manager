@@ -204,6 +204,23 @@ public interface ISharePointService : IDisposable
         string siteUrl, string siteCollectionUrl);
 
     /// <summary>
+    /// Finds OneNote notebooks (folders containing .onetoc2 files) and checks whether
+    /// HTML_x0020_File_x0020_Type is correctly set to "OneNote.Notebook".
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <returns>A list of OneNote notebook items with their broken/healthy status.</returns>
+    Task<SharePointResult<List<BrokenOneNoteItem>>> GetBrokenOneNoteNotebooksAsync(string siteUrl);
+
+    /// <summary>
+    /// Fixes a broken OneNote notebook by setting HTML_x0020_File_x0020_Type to "OneNote.Notebook".
+    /// </summary>
+    /// <param name="siteUrl">The SharePoint site URL.</param>
+    /// <param name="libraryId">The GUID of the document library.</param>
+    /// <param name="itemId">The list item ID of the notebook folder.</param>
+    /// <returns>A result indicating success or failure.</returns>
+    Task<SharePointResult<bool>> FixOneNoteNotebookAsync(string siteUrl, Guid libraryId, int itemId);
+
+    /// <summary>
     /// Gets documents from a library for comparison purposes.
     /// Uses pagination to handle large libraries efficiently.
     /// </summary>
