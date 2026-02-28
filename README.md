@@ -7,6 +7,13 @@
 .\Sign-App.ps1
 ```
 
+**Build a release with signing:**
+```bash
+winget install -e --id GitHub.cli
+gh auth login
+.\Sign-App.ps1 -Version 1.0.1 -Release
+```
+
 **Run:**
 ```bash
 dotnet run
