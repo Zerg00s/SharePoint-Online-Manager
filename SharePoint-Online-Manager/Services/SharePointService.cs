@@ -3374,35 +3374,74 @@ public class SharePointService : ISharePointService
                 };
             }
 
-            var updateUrl = $"{baseUrl}/_api/web/lists(guid'{libraryId}')/items({itemId})";
-            var body = new StringContent(
-                "{\"HTML_x0020_File_x0020_Type\": \"OneNote.Notebook\"}",
-                System.Text.Encoding.UTF8,
-                "application/json");
+            // Use ValidateUpdateListItem — standard MERGE silently ignores system fields
+            // like HTML_x0020_File_x0020_Type, but ValidateUpdateListItem handles them properly.
+            var updateUrl = $"{baseUrl}/_api/web/lists(guid'{libraryId}')/items({itemId})/ValidateUpdateListItem";
+            var bodyJson = "{\"formValues\":[{\"FieldName\":\"HTML_x0020_File_x0020_Type\",\"FieldValue\":\"OneNote.Notebook\"}],\"bNewDocumentUpdate\":false}";
+            var body = new StringContent(bodyJson, System.Text.Encoding.UTF8, "application/json");
 
             var request = new HttpRequestMessage(HttpMethod.Post, updateUrl)
             {
                 Content = body
             };
-            request.Headers.Add("X-HTTP-Method", "MERGE");
-            request.Headers.Add("IF-MATCH", "*");
             request.Headers.Add("X-RequestDigest", formDigest);
 
             var response = await _client.SendAsync(request);
 
-            if (response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.NoContent)
+            if (!response.IsSuccessStatusCode)
             {
                 return new SharePointResult<bool>
                 {
-                    Data = true,
-                    Status = SharePointResultStatus.Success
+                    Status = GetSharePointStatus(response.StatusCode),
+                    ErrorMessage = $"HTTP {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}"
                 };
+            }
+
+            // ValidateUpdateListItem returns JSON with per-field results — check for errors
+            var responseJson = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(responseJson);
+
+            // Look for field-level errors in the response
+            JsonElement valueElement;
+            if (doc.RootElement.TryGetProperty("value", out valueElement))
+            {
+                foreach (var fieldResult in valueElement.EnumerateArray())
+                {
+                    var hasException = GetBoolProperty(fieldResult, "HasException");
+                    if (hasException)
+                    {
+                        var errorMsg = GetStringProperty(fieldResult, "ErrorMessage");
+                        return new SharePointResult<bool>
+                        {
+                            Status = SharePointResultStatus.Error,
+                            ErrorMessage = $"Field update error: {errorMsg}"
+                        };
+                    }
+                }
+            }
+            else if (doc.RootElement.TryGetProperty("d", out var dEl) &&
+                     dEl.TryGetProperty("ValidateUpdateListItem", out var validateEl) &&
+                     validateEl.TryGetProperty("results", out valueElement))
+            {
+                foreach (var fieldResult in valueElement.EnumerateArray())
+                {
+                    var hasException = GetBoolProperty(fieldResult, "HasException");
+                    if (hasException)
+                    {
+                        var errorMsg = GetStringProperty(fieldResult, "ErrorMessage");
+                        return new SharePointResult<bool>
+                        {
+                            Status = SharePointResultStatus.Error,
+                            ErrorMessage = $"Field update error: {errorMsg}"
+                        };
+                    }
+                }
             }
 
             return new SharePointResult<bool>
             {
-                Status = GetSharePointStatus(response.StatusCode),
-                ErrorMessage = $"HTTP {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}"
+                Data = true,
+                Status = SharePointResultStatus.Success
             };
         }
         catch (Exception ex)
