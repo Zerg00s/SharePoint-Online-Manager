@@ -3191,7 +3191,7 @@ public class SharePointService : ISharePointService
                 };
             }
 
-            // Track processed folder paths to deduplicate
+            // Track processed notebook folder paths to deduplicate across libraries
             var processedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var libElement in listsValue.EnumerateArray())
@@ -3206,100 +3206,151 @@ public class SharePointService : ISharePointService
 
                 if (libId == Guid.Empty) continue;
 
-                // Query for .onetoc2 files in this library
-                var onetocUrl = $"{baseUrl}/_api/web/lists(guid'{libId}')/items?$select=Id,FileLeafRef,FileRef,FileDirRef,HTML_x0020_File_x0020_Type,FSObjType&$filter=substringof('.onetoc2',FileLeafRef)&$top=5000";
-                HttpResponseMessage onetocResponse;
-                try
+                // Page through ALL items in the library using Id-based batching (threshold-safe).
+                // We collect .onetoc2 files and folder items, then cross-reference client-side.
+                var onetoc2FileDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var folderItems = new Dictionary<string, (int Id, string Name, string HtmlFileType)>(StringComparer.OrdinalIgnoreCase);
+
+                int lastId = 0;
+                bool hasMore = true;
+                const string selectFields = "Id,FileLeafRef,FileRef,FileDirRef,HTML_x0020_File_x0020_Type,FSObjType";
+
+                while (hasMore)
                 {
-                    onetocResponse = await _client.GetAsync(onetocUrl);
-                }
-                catch
-                {
-                    continue;
+                    var apiUrl = $"{baseUrl}/_api/web/lists(guid'{libId}')/items" +
+                                 $"?$select={selectFields}&$top=5000&$orderby=Id asc&$filter=Id gt {lastId}";
+
+                    HttpResponseMessage pageResponse;
+                    try
+                    {
+                        pageResponse = await _client.GetAsync(apiUrl);
+                    }
+                    catch
+                    {
+                        break;
+                    }
+
+                    if (!pageResponse.IsSuccessStatusCode)
+                        break;
+
+                    var pageJson = await pageResponse.Content.ReadAsStringAsync();
+                    using var pageDoc = JsonDocument.Parse(pageJson);
+
+                    JsonElement pageValue;
+                    if (pageDoc.RootElement.TryGetProperty("value", out pageValue))
+                    {
+                        // nometadata
+                    }
+                    else if (pageDoc.RootElement.TryGetProperty("d", out var dEl2) &&
+                             dEl2.TryGetProperty("results", out pageValue))
+                    {
+                        // verbose
+                    }
+                    else
+                    {
+                        break;
+                    }
+
+                    int pageCount = 0;
+                    foreach (var item in pageValue.EnumerateArray())
+                    {
+                        pageCount++;
+                        var itemId = GetIntProperty(item, "Id");
+                        lastId = itemId;
+
+                        var fileLeafRef = GetStringProperty(item, "FileLeafRef");
+                        var fileRef = GetStringProperty(item, "FileRef");
+                        var fileDirRef = GetStringProperty(item, "FileDirRef");
+                        var fsObjType = GetIntProperty(item, "FSObjType");
+                        var htmlFileType = GetStringProperty(item, "HTML_x0020_File_x0020_Type");
+
+                        if (fsObjType == 1)
+                        {
+                            // Folder item — store for later cross-reference
+                            if (!string.IsNullOrEmpty(fileRef))
+                            {
+                                folderItems[fileRef] = (itemId, fileLeafRef, htmlFileType);
+                            }
+                        }
+                        else if (fileLeafRef.EndsWith(".onetoc2", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // .onetoc2 file — record its parent directory
+                            if (!string.IsNullOrEmpty(fileDirRef))
+                            {
+                                onetoc2FileDirs.Add(fileDirRef);
+                            }
+                        }
+                    }
+
+                    hasMore = pageCount >= 5000;
                 }
 
-                if (!onetocResponse.IsSuccessStatusCode)
-                    continue;
-
-                var onetocJson = await onetocResponse.Content.ReadAsStringAsync();
-                using var onetocDoc = JsonDocument.Parse(onetocJson);
-
-                JsonElement onetocValue;
-                if (onetocDoc.RootElement.TryGetProperty("value", out onetocValue))
+                // Cross-reference: for each .onetoc2 parent dir, find the topmost notebook folder
+                foreach (var fileDirRef in onetoc2FileDirs)
                 {
-                    // nometadata
-                }
-                else if (onetocDoc.RootElement.TryGetProperty("d", out var dEl2) &&
-                         dEl2.TryGetProperty("results", out onetocValue))
-                {
-                    // verbose
-                }
-                else
-                {
-                    continue;
-                }
-
-                foreach (var onetocItem in onetocValue.EnumerateArray())
-                {
-                    var fileDirRef = GetStringProperty(onetocItem, "FileDirRef");
-                    if (string.IsNullOrEmpty(fileDirRef)) continue;
-
-                    // Determine the topmost notebook folder (first folder below the library root)
                     var notebookFolderPath = GetNotebookFolderPath(fileDirRef, libRootUrl);
                     if (string.IsNullOrEmpty(notebookFolderPath)) continue;
 
                     // Deduplicate by folder path
                     if (!processedFolders.Add(notebookFolderPath)) continue;
 
-                    // Query for the folder item to get its ItemId and HTML_x0020_File_x0020_Type
-                    var encodedFolderPath = notebookFolderPath.Replace("'", "''");
-                    var folderUrl = $"{baseUrl}/_api/web/lists(guid'{libId}')/items?$filter=FileRef eq '{encodedFolderPath}' and FSObjType eq 1&$select=Id,FileLeafRef,FileRef,HTML_x0020_File_x0020_Type&$top=1";
-                    try
+                    // Look up the folder item we collected during paging
+                    if (folderItems.TryGetValue(notebookFolderPath, out var folderInfo))
                     {
-                        var folderResponse = await _client.GetAsync(folderUrl);
-                        if (!folderResponse.IsSuccessStatusCode) continue;
-
-                        var folderJson = await folderResponse.Content.ReadAsStringAsync();
-                        using var folderDoc = JsonDocument.Parse(folderJson);
-
-                        JsonElement folderValue;
-                        if (folderDoc.RootElement.TryGetProperty("value", out folderValue))
+                        notebooks.Add(new BrokenOneNoteItem
                         {
-                            // nometadata
-                        }
-                        else if (folderDoc.RootElement.TryGetProperty("d", out var dEl3) &&
-                                 dEl3.TryGetProperty("results", out folderValue))
-                        {
-                            // verbose
-                        }
-                        else
-                        {
-                            continue;
-                        }
-
-                        foreach (var folderItem in folderValue.EnumerateArray())
-                        {
-                            var itemId = GetIntProperty(folderItem, "Id");
-                            var folderName = GetStringProperty(folderItem, "FileLeafRef");
-                            var htmlFileType = GetStringProperty(folderItem, "HTML_x0020_File_x0020_Type");
-
-                            notebooks.Add(new BrokenOneNoteItem
-                            {
-                                SiteUrl = siteUrl,
-                                SiteTitle = siteTitle,
-                                LibraryTitle = libTitle,
-                                LibraryId = libId,
-                                FolderName = folderName,
-                                FolderServerRelativeUrl = notebookFolderPath,
-                                ItemId = itemId,
-                                HtmlFileType = htmlFileType
-                            });
-                            break; // Only take the first match
-                        }
+                            SiteUrl = siteUrl,
+                            SiteTitle = siteTitle,
+                            LibraryTitle = libTitle,
+                            LibraryId = libId,
+                            FolderName = folderInfo.Name,
+                            FolderServerRelativeUrl = notebookFolderPath,
+                            ItemId = folderInfo.Id,
+                            HtmlFileType = folderInfo.HtmlFileType
+                        });
                     }
-                    catch
+                    else
                     {
-                        // Skip this folder if query fails
+                        // Folder item not found in paged results — query directly via GetFolderByServerRelativeUrl
+                        // (this is threshold-safe as it uses folder API, not list items)
+                        try
+                        {
+                            var escapedPath = notebookFolderPath.Replace("'", "''");
+                            var folderUrl = $"{baseUrl}/_api/web/GetFolderByServerRelativeUrl('{escapedPath}')/ListItemAllFields?$select=Id,FileLeafRef,FileRef,HTML_x0020_File_x0020_Type";
+                            var folderResponse = await _client.GetAsync(folderUrl);
+                            if (!folderResponse.IsSuccessStatusCode) continue;
+
+                            var folderJson = await folderResponse.Content.ReadAsStringAsync();
+                            using var folderDoc = JsonDocument.Parse(folderJson);
+
+                            // ListItemAllFields returns a single object, not an array
+                            var folderRoot = folderDoc.RootElement;
+                            if (folderRoot.TryGetProperty("d", out var dEl3))
+                                folderRoot = dEl3;
+
+                            var itemId = GetIntProperty(folderRoot, "Id");
+                            var folderName = GetStringProperty(folderRoot, "FileLeafRef");
+                            var htmlFileType = GetStringProperty(folderRoot, "HTML_x0020_File_x0020_Type");
+
+                            if (itemId > 0)
+                            {
+                                notebooks.Add(new BrokenOneNoteItem
+                                {
+                                    SiteUrl = siteUrl,
+                                    SiteTitle = siteTitle,
+                                    LibraryTitle = libTitle,
+                                    LibraryId = libId,
+                                    FolderName = folderName,
+                                    FolderServerRelativeUrl = notebookFolderPath,
+                                    ItemId = itemId,
+                                    HtmlFileType = htmlFileType
+                                });
+                            }
+                        }
+                        catch
+                        {
+                            // Skip this folder if query fails
+                        }
                     }
                 }
             }
